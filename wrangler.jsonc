@@ -4,7 +4,7 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-11-04",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
   "secrets": { "required": ["CAPY_API_KEY", "MCP_AUTH_TOKEN"] },
   "vars": {

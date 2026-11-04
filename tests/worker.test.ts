@@ -3,6 +3,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { selectOperations } from "../src/catalog.js";
 import worker from "../src/worker.js";
+import wranglerSource from "../wrangler.jsonc?raw";
 
 const credentials = { CAPY_API_KEY: "test-upstream-key", MCP_AUTH_TOKEN: "test-mcp-token" };
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "worker-test", version: "1" } } };
@@ -24,6 +25,14 @@ function serve(req = request(), env: Partial<Env> = credentials) {
 describe("private Worker in workerd", () => {
   beforeEach(() => { vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected upstream request")); });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it("provides a reachable self-hosted default while preserving private access configuration", () => {
+    const config = JSON.parse(wranglerSource);
+    expect(config.workers_dev).toBe(true);
+    expect(config.preview_urls).toBe(false);
+    expect(config.secrets.required).toEqual(["CAPY_API_KEY", "MCP_AUTH_TOKEN"]);
+    expect(config.vars.MCP_ALLOWED_ORIGINS).toBe("");
+  });
 
   it("initializes through the configured Worker entry with finite JSON and no session", async () => {
     const response = await exports.default.fetch(request(initialize));
