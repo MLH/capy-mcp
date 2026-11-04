@@ -13,9 +13,13 @@
     "generate:check": "tsx scripts/generate.ts --check",
     "api:refresh": "tsx scripts/refresh-api.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@modelcontextprotocol/core": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0"
+  },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.5.1",
+    "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "24.10.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
