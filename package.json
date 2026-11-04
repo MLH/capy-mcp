@@ -1,7 +1,16 @@
 {
   "name": "capy-mcp",
   "version": "0.0.0",
+  "description": "Schema-validated Capy API tools over local STDIO and authenticated Workers MCP HTTP",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mlh/capy-mcp.git"
+  },
+  "homepage": "https://github.com/mlh/capy-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/mlh/capy-mcp/issues"
+  },
   "type": "module",
   "bin": {
     "capy-mcp": "dist/stdio.js"
@@ -14,6 +23,7 @@
     "build": "tsx scripts/build.ts",
     "test": "npm run build && vitest run && npm run test:worker",
     "test:worker": "vitest run --config vitest.workers.config.ts",
+    "worker:check": "wrangler deploy --dry-run --outdir dist/worker",
     "types:worker": "wrangler types --strict-vars=false",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.workers.json",
     "generate": "tsx scripts/generate.ts",
