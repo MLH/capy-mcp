@@ -59,6 +59,8 @@ export function createSchemaCompiler() {
   const compiler = new Ajv2020({
     strict: true,
     strictTypes: false,
+    ownProperties: true,
+    allowMatchingProperties: true,
     coerceTypes: false,
     useDefaults: false,
     removeAdditional: false,
@@ -72,7 +74,15 @@ function objectSchema(
   properties: Record<string, Schema>,
   required: string[],
 ): JsonSchema {
-  return { type: "object", properties, required, additionalProperties: false };
+  return {
+    type: "object",
+    properties,
+    required,
+    additionalProperties: false,
+    ...(Object.hasOwn(properties, "__proto__")
+      ? { patternProperties: { "^__proto__$": properties.__proto__ } }
+      : {}),
+  };
 }
 
 function resolveReference(
@@ -309,7 +319,7 @@ export function buildCatalog(document: OpenApiDocument): Operation[] {
       )
         throw new Error("Route does not match declared path parameters");
       for (const location of ["path", "query"]) {
-        const fields: Record<string, Schema> = {};
+        const fields: Record<string, Schema> = Object.create(null);
         const requiredFields: string[] = [];
         for (const parameter of parameters.values()) {
           if (parameter.in !== location) continue;

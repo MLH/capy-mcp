@@ -14,7 +14,8 @@ import { build } from "esbuild";
 import { runInNewContext } from "node:vm";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { buildCatalog } from "../scripts/catalog.js";
+import { buildCatalog, createSchemaCompiler } from "../scripts/catalog.js";
+import standalone from "ajv/dist/standalone/index.js";
 import { selectOperations } from "../src/catalog.js";
 import snapshot from "../api/openapi.json" with { type: "json" };
 import source from "../api/source.json" with { type: "json" };
@@ -139,6 +140,81 @@ describe("catalog coverage and names", () => {
 });
 
 describe("self-contained JSON schemas", () => {
+  it.each(
+    ["__proto__", "constructor", "toString", "hasOwnProperty"].flatMap((name) =>
+      [false, true].map((required) => ({ name, required })),
+    ),
+  )(
+    "preserves prototype-sensitive query parameter $name (required=$required)",
+    ({ name, required }) => {
+      const document = fixture();
+      Object.assign(document.paths["/things/{id}"].post.parameters[1], {
+        name,
+        required,
+      });
+      const [operation] = buildCatalog(document);
+      const validate = createSchemaCompiler().compile(operation.inputSchema);
+      const base = { path: { id: "a" }, body: "text" };
+      expect(validate(base)).toBe(!required);
+      expect(validate({ ...base, query: {} })).toBe(!required);
+      expect(
+        validate({ ...base, query: Object.fromEntries([[name, true]]) }),
+      ).toBe(true);
+      expect(
+        validate({ ...base, query: Object.fromEntries([[name, "true"]]) }),
+      ).toBe(false);
+      expect(
+        validate({
+          ...base,
+          query: Object.fromEntries([
+            [name, true],
+            ["extra", true],
+          ]),
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it("preserves prototype-sensitive required path parameters in standalone validators", async () => {
+    const document = fixture();
+    document.paths["/things/{id}"].post.parameters[0].name = "__proto__";
+    const paths = { "/things/{__proto__}": document.paths["/things/{id}"] };
+    const [operation] = buildCatalog({ ...document, paths });
+    const compiler = createSchemaCompiler();
+    const validate = compiler.compile(operation.inputSchema);
+    const source = standalone.default(compiler, validate);
+    const bundled = await build({
+      stdin: { contents: source, resolveDir: resolve(".") },
+      bundle: true,
+      format: "iife",
+      globalName: "compiled",
+      write: false,
+      platform: "neutral",
+    });
+    const context = {
+      compiled: undefined as
+        | undefined
+        | { default: (value: unknown) => boolean },
+    };
+    runInNewContext(bundled.outputFiles[0].text, context, {
+      contextCodeGeneration: { strings: false, wasm: false },
+    });
+    const standaloneValidate = context.compiled!.default;
+    expect(
+      standaloneValidate({
+        path: Object.fromEntries([["__proto__", "a"]]),
+        body: "text",
+      }),
+    ).toBe(true);
+    expect(standaloneValidate({ path: {}, body: "text" })).toBe(false);
+    expect(
+      standaloneValidate({
+        path: Object.fromEntries([["__proto__", false]]),
+        body: "text",
+      }),
+    ).toBe(false);
+  });
+
   it("requires path and body while allowing an omitted optional query object", () => {
     const validate = validator();
     expect(validate({ path: { id: "a" }, body: "text" })).toBe(true);
