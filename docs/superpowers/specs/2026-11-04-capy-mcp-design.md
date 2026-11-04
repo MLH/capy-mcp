@@ -1,6 +1,6 @@
 # Capy MCP server
 
-Status: proposed for Erin's approval. The named-tool approach and configurable API groups are agreed; the implementation details below are proposed defaults.
+Status: approved by Erin on 2026-11-04. Implementation choices explicitly left to the builder are recorded in the implementation plan.
 
 ## Intent
 
