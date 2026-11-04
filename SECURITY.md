@@ -8,7 +8,7 @@ The workers.dev endpoint is publicly network-reachable after deployment, but req
 
 Upstream requests use only the fixed Capy HTTPS origin and generated routes. Clients cannot supply credentials or arbitrary headers through tool inputs; the MCP token is never forwarded as a Capy key. Requests have a 30-second upstream deadline, 1 MiB upstream response bound, and a Worker 1 MiB ingress bound. Redirects are rejected; invalid inputs and disabled tools fail before upstream calls. Errors expose only sanitized metadata, not raw upstream prose. These safeguards don't undo an upstream mutation after a timeout.
 
-Never log credentials, request/message bodies, environment values, signed URLs, or upstream response bodies. Keep `.dev.vars*` and `.env*` files out of Git and build artifacts. Wrangler secrets belong in encrypted secret bindings, not plaintext `vars`. Production required-secret checks must not be relaxed to silence local test warnings. Review platform logs/traces and any proxy logging separately before operating a deployment.
+Never log credentials, request/message bodies, environment values, signed URLs, or upstream response bodies. Keep `.dev.vars*`, `.env*`, and `.secrets.production.json` files out of Git and build artifacts. Use the permission-restricted JSON secrets file documented in the README for first deployment so dotenv expansion or process-environment substitution cannot change the chosen values. Wrangler secrets belong in encrypted secret bindings, not plaintext `vars`. Production required-secret checks must not be relaxed to silence local test warnings. Review platform logs/traces and any proxy logging separately before operating a deployment.
 
 ## Reporting
 

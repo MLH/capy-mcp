@@ -70,11 +70,20 @@ The dry-run writes to ignored `dist/worker`. It needs no Cloudflare account or d
 
 The following commands change Cloudflare resources. They are instructions for an operator, not part of tests or CI. First choose the account and Worker name in `wrangler.jsonc`, authenticate Wrangler, review principal/group access, and arrange secure secret storage.
 
-For the first deployment, create a permission-restricted, Git-ignored `.env.production` containing both required secrets, then upload code and secrets together:
+For the first deployment, create a new `.secrets.production.json` beside `wrangler.jsonc` under a restrictive umask (`077`), and keep its file permissions at `0600`. This exact path is Git-ignored. Using a secure editor, replace both placeholders with the independently chosen secret values:
+
+```json
+{
+  "CAPY_API_KEY": "<chosen-capy-api-key>",
+  "MCP_AUTH_TOKEN": "<independently-chosen-mcp-token>"
+}
+```
+
+Use valid JSON with string values and normal JSON escaping for quotes/backslashes. Wrangler parses valid JSON secrets literally: dollar references are not expanded and same-name process environment variables do not replace the chosen values. Do not substitute a dotenv secrets file here; its expansion and process-environment precedence can silently select a different Capy principal or MCP token. Then upload code and secrets together:
 
 ```sh
 npx wrangler login
-npx wrangler deploy --secrets-file .env.production
+npx wrangler deploy --secrets-file .secrets.production.json
 ```
 
 Keep that file out of artifacts and backups that aren't approved for secrets; remove it securely when no longer needed. For later interactive secret rotation on the existing Worker, Wrangler prompts for values:
