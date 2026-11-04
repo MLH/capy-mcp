@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["./worker-configuration.d.ts", "@cloudflare/vitest-plugin/types", "node"]
+  },
+  "include": ["src/worker.ts", "tests/worker.test.ts", "vitest.workers.config.ts"],
+  "exclude": []
+}

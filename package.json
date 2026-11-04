@@ -3,12 +3,19 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "capy-mcp": "dist/stdio.js"
+  },
+  "files": ["dist/stdio.js"],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "build": "tsx scripts/build.ts",
+    "test": "npm run build && vitest run && npm run test:worker",
+    "test:worker": "vitest run --config vitest.workers.config.ts",
+    "types:worker": "wrangler types --strict-vars=false",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.workers.json",
     "generate": "tsx scripts/generate.ts",
     "generate:check": "tsx scripts/generate.ts --check",
     "api:refresh": "tsx scripts/refresh-api.ts"
@@ -26,6 +33,7 @@
     "esbuild": "0.28.2",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
-    "vitest": "4.1.12"
+    "vitest": "4.1.12",
+    "wrangler": "4.157.0"
   }
 }
