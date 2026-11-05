@@ -5,7 +5,7 @@ import { validators } from "./generated/validators.js";
 
 export function createCapyServer(
   config: { apiKey: string; groups?: string },
-  options?: { fetch?: typeof fetch },
+  options?: { fetch?: typeof fetch; signal?: AbortSignal },
 ): Server {
   const operations = new Map(selectOperations(config.groups).map((operation) => [operation.name, operation]));
   const server = new Server({ name: "capy-mcp", version: "0.0.0" }, { capabilities: { tools: {} } });
@@ -22,7 +22,9 @@ export function createCapyServer(
     if (!validate(args)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid tool arguments");
     try {
       const value = await callCapy(operation, args as ToolArguments, {
-        apiKey: config.apiKey, signal: ctx.mcpReq.signal, fetch: options?.fetch,
+        apiKey: config.apiKey,
+        signal: options?.signal ? AbortSignal.any([ctx.mcpReq.signal, options.signal]) : ctx.mcpReq.signal,
+        fetch: options?.fetch,
       });
       const structuredContent = value !== null && typeof value === "object" && !Array.isArray(value)
         ? value as Record<string, unknown>

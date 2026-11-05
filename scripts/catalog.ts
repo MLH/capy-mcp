@@ -79,9 +79,6 @@ function objectSchema(
     properties,
     required,
     additionalProperties: false,
-    ...(Object.hasOwn(properties, "__proto__")
-      ? { patternProperties: { "^__proto__$": properties.__proto__ } }
-      : {}),
   };
 }
 
@@ -111,7 +108,7 @@ function resolveReference(
 function parameterShape(
   document: OpenApiDocument,
   schema: Schema,
-  array: boolean,
+  location: "path" | "query" | "item",
   seen = new Set<Schema>(),
 ): boolean {
   if (typeof schema === "boolean" || seen.has(schema)) return false;
@@ -120,21 +117,25 @@ function parameterShape(
     return parameterShape(
       document,
       resolveReference(document, schema.$ref),
-      array,
+      location,
       visited,
     );
   if (Array.isArray(schema.anyOf))
     return schema.anyOf.every((part) =>
-      parameterShape(document, part, array, visited),
+      parameterShape(document, part, location, visited),
     );
   if (Array.isArray(schema.oneOf))
     return schema.oneOf.every((part) =>
-      parameterShape(document, part, array, visited),
+      parameterShape(document, part, location, visited),
     );
-  if (["string", "number", "integer", "boolean"].includes(String(schema.type)))
+  if (schema.type === "string") return true;
+  if (
+    location !== "path" &&
+    ["number", "integer", "boolean"].includes(String(schema.type))
+  )
     return true;
-  if (schema.type === "array" && array)
-    return parameterShape(document, schema.items as Schema, false, visited);
+  if (schema.type === "array" && location === "query")
+    return parameterShape(document, schema.items as Schema, "item", visited);
   return false;
 }
 
@@ -200,6 +201,16 @@ function selfContained(
       } else {
         result[key] = structuredClone(value);
       }
+    }
+    const properties = result.properties as Record<string, Schema> | undefined;
+    if (properties && Object.hasOwn(properties, "__proto__")) {
+      const patterns = (result.patternProperties ?? {}) as Record<string, Schema>;
+      result.patternProperties = {
+        ...patterns,
+        "^__proto__$": Object.hasOwn(patterns, "^__proto__$")
+          ? { allOf: [patterns["^__proto__$"], properties.__proto__] }
+          : properties.__proto__,
+      };
     }
     return result;
   }
@@ -298,7 +309,7 @@ export function buildCatalog(document: OpenApiDocument): Operation[] {
           (parameter.style !== undefined &&
             parameter.style !== (query ? "form" : "simple")) ||
           (parameter.explode !== undefined && parameter.explode !== query) ||
-          !parameterShape(document, parameter.schema, query)
+          !parameterShape(document, parameter.schema, query ? "query" : "path")
         )
           throw new Error("Unsupported parameter serialization");
         if (!parameter.name || (!query && parameter.required !== true))

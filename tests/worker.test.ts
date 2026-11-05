@@ -238,4 +238,55 @@ describe("private Worker in workerd", () => {
     }));
     expect(lists).toEqual(["captains", "issues"].map((group) => ({ jsonrpc: "2.0", id: 2, result: { tools: selectOperations(group).map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations })) } })));
   });
+
+  it.each(["headers", "body"])("settles an HTTP abort during upstream %s without cancelling another active request", async (phase) => {
+    const controller = new AbortController();
+    let started!: () => void;
+    let otherStarted!: () => void;
+    let releaseOther!: (response: Response) => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const otherReady = new Promise<void>((resolve) => { otherStarted = resolve; });
+    const otherResponse = new Promise<Response>((resolve) => { releaseOther = resolve; });
+    let abortedSignal: AbortSignal | null | undefined;
+    let otherSignal: AbortSignal | null | undefined;
+    let bodyCancelled = false;
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      if (new Headers(init?.headers).get("authorization") === "Bearer other-key") {
+        otherSignal = init?.signal;
+        otherStarted();
+        return otherResponse;
+      }
+      abortedSignal = init?.signal;
+      if (phase === "headers") {
+        started();
+        return new Promise<Response>(() => {});
+      }
+      return new Response(new ReadableStream({
+        pull() { started(); },
+        cancel() { bodyCancelled = true; },
+      }, { highWaterMark: 0 }));
+    });
+    const pending = serve(new Request(request(call), { signal: controller.signal }));
+    const other = serve(request(call), { ...credentials, CAPY_API_KEY: "other-key" });
+    await Promise.all([ready, otherReady]);
+    controller.abort(new Error("private abort reason"));
+    await expect.poll(() => abortedSignal?.aborted, { timeout: 500 }).toBe(true);
+    const response = await pending;
+    expect(await response.json()).toMatchObject({ result: { isError: true, structuredContent: { error: { code: "cancelled" } } } });
+    if (phase === "body") expect(bodyCancelled).toBe(true);
+    expect(otherSignal?.aborted).toBe(false);
+    releaseOther(Response.json({ issues: [{ code: "CAP-2" }] }));
+    expect(await (await other).json()).toMatchObject({ result: { structuredContent: { issues: [{ code: "CAP-2" }] } } });
+    expect(otherSignal?.aborted).toBe(false);
+  }, 2_000);
+
+  it("settles pre-aborted HTTP calls without upstream work or exposing the abort reason", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("private abort reason"));
+    const response = await serve(new Request(request(call), { signal: controller.signal }));
+    const text = await response.text();
+    expect(JSON.parse(text)).toMatchObject({ result: { isError: true, structuredContent: { error: { code: "cancelled" } } } });
+    expect(text).not.toContain("private abort reason");
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });

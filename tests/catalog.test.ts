@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { buildCatalog, createSchemaCompiler } from "../scripts/catalog.js";
 import standalone from "ajv/dist/standalone/index.js";
 import { selectOperations } from "../src/catalog.js";
+import { callCapy } from "../src/client.js";
 import snapshot from "../api/openapi.json" with { type: "json" };
 import source from "../api/source.json" with { type: "json" };
 
@@ -140,6 +141,58 @@ describe("catalog coverage and names", () => {
 });
 
 describe("self-contained JSON schemas", () => {
+  it("preserves nested referenced body __proto__ constraints and existing patterns in standalone output", async () => {
+    const document = fixture({
+      type: "object",
+      properties: { nested: { $ref: "#/components/schemas/Body" } },
+      required: ["nested"],
+    });
+    document.components.schemas.Body = {
+      type: "object",
+      properties: Object.fromEntries([["__proto__", { type: "integer", minimum: 1 }]]),
+      required: ["__proto__"],
+      patternProperties: {
+        "^__proto__$": { maximum: 3 },
+        "^label": { type: "string" },
+      },
+      additionalProperties: false,
+    };
+    const [operation] = buildCatalog(document);
+    const compiler = createSchemaCompiler();
+    const validate = compiler.compile(operation.inputSchema);
+    const bundled = await build({
+      stdin: {
+        contents: standalone.default(compiler, validate),
+        resolveDir: resolve("."),
+      },
+      bundle: true,
+      format: "iife",
+      globalName: "compiled",
+      write: false,
+      platform: "neutral",
+    });
+    const context = {
+      compiled: undefined as undefined | { default: (value: unknown) => boolean },
+    };
+    runInNewContext(bundled.outputFiles[0].text, context, {
+      contextCodeGeneration: { strings: false, wasm: false },
+    });
+    for (const check of [validate, context.compiled!.default]) {
+      const input = (proto: unknown, label: unknown = "ok") => ({
+        path: { id: "a" },
+        body: {
+          nested: Object.fromEntries([["__proto__", proto], ["labelOne", label]]),
+        },
+      });
+      expect(check(input(2))).toBe(true);
+      expect(check(input("not-integer"))).toBe(false);
+      expect(check(input(0))).toBe(false);
+      expect(check(input(4))).toBe(false);
+      expect(check(input(2, false))).toBe(false);
+      expect(check({ path: { id: "a" }, body: { nested: {} } })).toBe(false);
+    }
+  });
+
   it.each(
     ["__proto__", "constructor", "toString", "hasOwnProperty"].flatMap((name) =>
       [false, true].map((required) => ({ name, required })),
@@ -359,6 +412,49 @@ describe("self-contained JSON schemas", () => {
     const document = fixture();
     document.paths["/things/{id}"].post.parameters[0].name = "other";
     expect(() => buildCatalog(document)).toThrow(/path parameter/i);
+  });
+
+  it.each([
+    { type: "integer" },
+    { type: "number" },
+    { type: "boolean" },
+    { $ref: "#/components/schemas/NonString" },
+    { anyOf: [{ type: "string" }, { type: "integer" }] },
+    { oneOf: [{ type: "boolean" }, { type: "string" }] },
+  ])("rejects unsupported non-string path schemas at generation: %j", (schema) => {
+    const document = fixture();
+    document.components.schemas.NonString = { type: "integer" };
+    Object.assign(document.paths["/things/{id}"].post.parameters[0], {
+      schema,
+    });
+    expect(() => buildCatalog(document)).toThrow(/parameter|serialization/i);
+  });
+
+  it("executes generated referenced string path unions as encoded string segments", async () => {
+    const document = fixture({ type: "object" });
+    document.components.schemas.Id = {
+      anyOf: [
+        { type: "string", enum: ["a/b"] },
+        { type: "string", enum: ["other"] },
+      ],
+    };
+    Object.assign(document.paths["/things/{id}"].post.parameters[0], {
+      schema: { $ref: "#/components/schemas/Id" },
+    });
+    const [operation] = buildCatalog(document);
+    const args = { path: { id: "a/b" }, body: {} };
+    const validate = createSchemaCompiler().compile(operation.inputSchema);
+    expect(validate(args)).toBe(true);
+    expect(validate({ ...args, path: { id: 1 } })).toBe(false);
+    let requested = "";
+    await expect(callCapy(operation, args, {
+      apiKey: "test-key",
+      fetch: async (url) => {
+        requested = String(url);
+        return Response.json({ ok: true });
+      },
+    })).resolves.toEqual({ ok: true });
+    expect(requested).toBe("https://api.capy.ai/things/a%2Fb");
   });
 
   it("rejects schema constraints that would require asynchronous validation", () => {

@@ -36,6 +36,8 @@ npm test
 
 Refresh is a network operation. Inspect both the upstream contract diff and all generated artifacts in `src/generated/`; do not hand-edit generated schemas or validators. Generation must reject unsupported schema/serialization features, unresolved references, and naming collisions instead of silently losing validation. Account for every operation and update coverage docs/tests if the approved scope changes. `npm run generate` alone regenerates from the pinned local snapshot.
 
+Path parameter schemas must accept only strings, including through references and unions; non-string path shapes fail generation rather than advertising values the request builder rejects. Query scalar/array support is unchanged. Every copied schema preserves `__proto__` property constraints through equivalent pattern validation, including nested/referenced bodies and existing pattern constraints. Check both advertised schemas and standalone validators when changing this normalization.
+
 When Worker bindings/configuration change, run `npm run types:worker`, inspect `worker-configuration.d.ts`, and verify with `npx wrangler types --strict-vars=false --check`. Wrangler currently emits trailing whitespace in parts of its generated file; normalize whitespace if needed before the final diff check. Keep real secrets out of type-generation input and committed files.
 
 ## Change review

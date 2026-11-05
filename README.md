@@ -52,6 +52,8 @@ For STDIO, set that same value in the environment. Filtering applies to both dis
 
 The Worker serves only `/mcp`, using stateless Streamable HTTP with finite JSON responses and no persistent sessions. Authenticated `POST` is supported; after authentication and Origin checks, `GET`, `HEAD`, and `DELETE` return 405. Requests without an `Origin` header can proceed after authentication. A request with an Origin must match `MCP_ALLOWED_ORIGINS` exactly; no permissive CORS is supplied.
 
+The `2026-11-04` compatibility date explicitly enables `enable_request_signal` so an active HTTP request's abort/disconnect cancels its upstream I/O. Each HTTP request owns its server and transport: a separate cancellation-notification POST cannot cancel a previous request. Cancel the active HTTP request instead. STDIO supports MCP cancellation on its existing connection. Cancellation stops outstanding I/O, but cannot undo a mutation already accepted upstream or guarantee delivery of a result to a disconnected client.
+
 For local development, put `CAPY_API_KEY` and `MCP_AUTH_TOKEN` in a private `.dev.vars` file beside `wrangler.jsonc`, using dotenv syntax. These files are ignored by Git. Do not put secrets in Wrangler `vars`, source files, shell history, or example configuration. Local calls still contact the real Capy API and can incur costs.
 
 ```sh
@@ -194,7 +196,7 @@ Omit `stateId` to use the organization's default, or omit `labelIds` when no lab
 - Pagination is manual. Cursors and pages are returned unchanged; no automatic pagination or silent truncation occurs. File/attachment tools negotiate JSON upload/download URLs; this server doesn't read your filesystem or fetch signed URLs on your behalf.
 - Each upstream request has a **30-second deadline**, covering headers and body, and a **1 MiB (1,048,576 bytes) response limit**. Worker MCP POST bodies also have a **1 MiB** limit. Oversized or timed-out results fail explicitly; the server doesn't return a partial success.
 - Invalid arguments, unsafe path values, and unknown/disabled tools fail as MCP protocol errors before upstream work. Capy/transport failures are `isError: true` tool results with sanitized error codes and optional `status`, allowlisted `tag`, and `retryAfterSeconds`. Raw upstream errors, echoed request data, and exception prose are not returned.
-- A Capy `429` preserves safe retry guidance; wait for `retryAfterSeconds` when supplied. No automatic retries are performed, especially for mutations. After a timeout or cancellation, a mutation may already have happened upstream: check its outcome and reuse supported idempotency inputs rather than creating duplicate work. Upstream redirects are refused.
+- A Capy `429` preserves safe retry guidance; wait for `retryAfterSeconds` when supplied. A valid `Retry-After` delay or canonical HTTP-date (IMF-fixdate, GMT) takes precedence over a numeric JSON retry field. Future dates round up to whole seconds, past dates become zero, and malformed headers fall back to the JSON field without exposing header text. No automatic retries are performed, especially for mutations. After a timeout or cancellation, a mutation may already have happened upstream: check its outcome and reuse supported idempotency inputs rather than creating duplicate work. Upstream redirects are refused.
 
 ## Coverage and exclusions
 

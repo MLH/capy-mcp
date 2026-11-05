@@ -148,6 +148,30 @@ describe("Capy client failures", () => {
     })).rejects.toMatchObject({ retryAfterSeconds: 12 });
   });
 
+  it.each([
+    ["Wed, 04 Nov 2026 23:59:00 GMT", 60],
+    ["Wed, 04 Nov 2026 23:57:00 GMT", 0],
+    ["Thu, 04 Nov 2026 23:59:00 GMT", 12],
+    ["Mon, 30 Feb 2026 23:59:00 GMT", 12],
+    ["2026-11-04T23:59:00Z", 12],
+    ["Wed, 04 Nov 2026 23:59:00 GMT private data", 12],
+    ["not a date", 12],
+  ])("sanitizes HTTP-date retry guidance %s without retrying a mutation", async (header, seconds) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-04T23:58:00.250Z"));
+    let calls = 0;
+    const error = await callCapy(operation("captains.create"), { body: {} }, {
+      apiKey, fetch: async () => {
+        calls++;
+        return json({ retryAfterSeconds: 12 }, { status: 429, headers: { "retry-after": header } });
+      },
+    }).catch((error: unknown) => error);
+    expect(error).toMatchObject({ code: "http_error", status: 429, retryAfterSeconds: seconds });
+    expect(JSON.stringify(error)).not.toContain(header);
+    expect(calls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("preserves HTTP status and retry guidance when an upstream error is not JSON", async () => {
     const error = await callCapy(operation("issues.list"), {}, {
       apiKey, fetch: async () => new Response(`${apiKey} ${secret}`, { status: 429, headers: { "retry-after": "10" } }),
@@ -284,5 +308,27 @@ describe("Capy client failures", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(signal?.aborted).toBe(false);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("removes the abort listener even when cancelled fetch never settles", async () => {
+    const controller = new AbortController();
+    let signal: AbortSignal | null | undefined;
+    let remove: ReturnType<typeof vi.spyOn> | undefined;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const pending = callCapy(operation("issues.list"), {}, {
+      apiKey, signal: controller.signal,
+      fetch: async (_url, init) => {
+        signal = init?.signal;
+        remove = vi.spyOn(signal!, "removeEventListener");
+        started();
+        return new Promise<Response>(() => {});
+      },
+    });
+    await ready;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: "cancelled" });
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    remove?.mockRestore();
   });
 });

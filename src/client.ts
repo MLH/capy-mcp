@@ -38,7 +38,10 @@ const errorTags = new Set([
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
-    const abort = () => reject(new CapyError("cancelled"));
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(new CapyError("cancelled"));
+    };
     if (signal.aborted) {
       promise.catch(() => {});
       abort();
@@ -75,7 +78,10 @@ export async function callCapy(
   }
 
   const deadline = new AbortController();
-  const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
+  const signal = deadline.signal;
+  const cancel = () => deadline.abort();
+  if (options.signal?.aborted) cancel();
+  else options.signal?.addEventListener("abort", cancel, { once: true });
   const timer = setTimeout(() => deadline.abort(), 30_000);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let response: Response | undefined;
@@ -134,6 +140,12 @@ export async function callCapy(
       const retryAfter = response.headers.get("retry-after");
       if (retryAfter !== null && /^\d+$/.test(retryAfter) && Number.isSafeInteger(Number(retryAfter))) {
         metadata.retryAfterSeconds = Number(retryAfter);
+      } else if (retryAfter !== null && /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(retryAfter)) {
+        const date = new Date(retryAfter);
+        const seconds = Math.max(0, Math.ceil((date.getTime() - Date.now()) / 1_000));
+        if (date.toUTCString() === retryAfter && Number.isSafeInteger(seconds)) {
+          metadata.retryAfterSeconds = seconds;
+        }
       }
       throw new CapyError("http_error", metadata);
     }
@@ -144,6 +156,7 @@ export async function callCapy(
     throw new CapyError("network_error");
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener("abort", cancel);
     if (reader) {
       void reader.cancel().catch(() => {});
     } else if (response?.body) {

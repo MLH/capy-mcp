@@ -41,7 +41,7 @@ export default {
 
     let server;
     try {
-      server = createCapyServer({ apiKey, groups: env.CAPY_TOOL_GROUPS });
+      server = createCapyServer({ apiKey, groups: env.CAPY_TOOL_GROUPS }, { signal: request.signal });
     } catch {
       return new Response("Invalid server configuration", { status: 503 });
     }
