@@ -1,6 +1,6 @@
 # Capy MCP
 
-Expose 102 named Capy API tools to Hermes and other MCP clients through local STDIO or a self-hosted Cloudflare Worker. Both transports use the same generated schemas, validation, group filtering, and bounded API client. The upstream origin is fixed to `https://api.capy.ai`.
+Expose 102 named Capy API tools to external MCP clients through local STDIO or a self-hosted Cloudflare Worker. Both transports use the same generated schemas, validation, group filtering, and bounded API client. The upstream origin is fixed to `https://api.capy.ai`. The server has no client-specific runtime dependency.
 
 This package is **private and unpublished**. Run the built local file; there is no published npm package to install with `npx`. MLH must choose a license before open-source publication or public distribution. No license is granted by this repository's current packaging.
 
@@ -40,13 +40,13 @@ Supported groups are:
 attachments,automations,captains,files,folders,issues,messages,projects,reviewFilters,reviewRules,reviews,subagents,threads,usage,users
 ```
 
-The checked-in Worker configuration explicitly enables all these groups. For a Hermes-focused deployment, replace its `CAPY_TOOL_GROUPS` value in `wrangler.jsonc` with:
+The checked-in Worker configuration explicitly enables all these groups. For a Captain-and-issue-focused deployment, replace its `CAPY_TOOL_GROUPS` value in `wrangler.jsonc` with:
 
 ```text
 captains,issues,messages,threads,projects,users
 ```
 
-For STDIO, set that same value in the environment. Filtering applies to both discovery and direct calls, but isn't a substitute for principal permissions. **The all-groups default includes sensitive mutations, including project environment-variable writes.** Even the Hermes-focused example includes `projects`, so it is not read-only. Tool annotations are guidance, not authorization or a spending safeguard.
+For STDIO, set that same value in the environment. Filtering applies to both discovery and direct calls, but isn't a substitute for principal permissions. **The all-groups default includes sensitive mutations, including project environment-variable writes.** Even the focused example includes `projects`, so it is not read-only. Tool annotations are guidance, not authorization or a spending safeguard.
 
 ## Worker development and deployment
 
@@ -103,11 +103,22 @@ npx wrangler deploy
 
 `workers_dev: true` makes the deployed Worker network-reachable at the workers.dev URL printed by Wrangler; append `/mcp`. Access is token-protected, not a private network. `preview_urls: false` disables preview URLs. Never remove authentication to make a client connect. Logs and traces are enabled, automatic invocation logs are disabled, and URL query strings are redacted. The application does not log payloads or credentials; review any additional platform logging before enabling it.
 
-## Hermes setup
+## Connect an MCP client
+
+Choose the transport your client supports. The connection details are the same whether you use Duet, Dot, Hermes, or another client; configuration syntax and transport support depend on the client. Duet and Dot have not been tested with this server.
+
+| Mode | Connection details |
+| --- | --- |
+| Local STDIO | Launch `node` with `/absolute/path/to/capy-mcp/dist/stdio.js` as its argument. Supply `CAPY_API_KEY` and optionally `CAPY_TOOL_GROUPS` in the server process environment. |
+| Remote Streamable HTTP | Use your deployed Worker's `/mcp` URL and an `Authorization: Bearer <MCP_AUTH_TOKEN>` header. Keep `CAPY_API_KEY` on the Worker, not in the client. |
+
+The remote endpoint supports POST only, not legacy SSE or OAuth. If your client requires a GET/HEAD preflight, configure it to skip that probe where supported. Keep its write-tool approval controls enabled; client approval is not a substitute for the server's access controls. The server exposes tools, not MCP resources or prompts. No live client session has been verified.
+
+### Example: Hermes
 
 These YAML entries follow the [current official Hermes MCP config reference](https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference), read on 2026-11-04. Add **one** entry under `mcp_servers` in your Hermes `config.yaml`. Put secrets in the active Hermes profile's secret scope (normally `~/.hermes/.env`) or process environment; `${env:...}` references keep them out of YAML. Configuration syntax was checked against the docs, but no live Hermes session has been verified.
 
-### Local STDIO
+#### Local STDIO
 
 Build first and replace the absolute path. Hermes launches Node itself:
 
@@ -123,7 +134,7 @@ mcp_servers:
     trust: untrusted
 ```
 
-### Remote Worker
+#### Remote Worker
 
 Replace the example host with the authorized deployment's host. Hermes uses Streamable HTTP by default; don't set `transport: sse` or `auth: oauth` for this server.
 
