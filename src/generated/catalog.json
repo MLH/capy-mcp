@@ -90,7 +90,7 @@
             },
             "limit": {
               "type": "string",
-              "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?$",
+              "pattern": "^[+-]?(?:\\d+|\\d*\\.\\d+)(?:[Ee][+-]?\\d+)?$",
               "description": "Event-count target, default 50 and maximum 200, paged exactly like the messages list. A page can contain no attachments; continue until its directional cursor is null."
             }
           },
@@ -1035,7 +1035,7 @@
                 "body_pointer": {
                   "type": "string",
                   "maxLength": 1024,
-                  "pattern": "^(?:\\/(?:[^~]|~[01])*)*$",
+                  "pattern": "^(?:\\/(?:[^~]|~[01])*)?$",
                   "description": "Strict RFC6901 JSON pointer into the parsed body, up to 1024 characters. Empty selects the root. The selected value must be a non-null finite scalar of at most 1024 UTF-8 bytes when JSON encoded."
                 }
               },
@@ -1076,7 +1076,7 @@
                 "body_pointer": {
                   "type": "string",
                   "maxLength": 1024,
-                  "pattern": "^(?:\\/(?:[^~]|~[01])*)*$",
+                  "pattern": "^(?:\\/(?:[^~]|~[01])*)?$",
                   "description": "Strict RFC6901 JSON pointer into the parsed body, up to 1024 characters. Empty selects the root. The selected value must be a non-null finite scalar of at most 1024 UTF-8 bytes when JSON encoded."
                 },
                 "equals": {
@@ -1344,7 +1344,7 @@
           "properties": {
             "limit": {
               "type": "string",
-              "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?$"
+              "pattern": "^[+-]?(?:\\d+|\\d*\\.\\d+)(?:[Ee][+-]?\\d+)?$"
             },
             "cursor": {
               "$ref": "#/$defs/WebhookBatchCursorEncoded"
@@ -1924,7 +1924,7 @@
             },
             "limit": {
               "type": "string",
-              "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?$"
+              "pattern": "^[+-]?(?:\\d+|\\d*\\.\\d+)(?:[Ee][+-]?\\d+)?$"
             }
           },
           "required": [],
@@ -3080,11 +3080,11 @@
           "properties": {
             "offset": {
               "type": "string",
-              "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?$"
+              "pattern": "^[+-]?(?:\\d+|\\d*\\.\\d+)(?:[Ee][+-]?\\d+)?$"
             },
             "limit": {
               "type": "string",
-              "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?$"
+              "pattern": "^[+-]?(?:\\d+|\\d*\\.\\d+)(?:[Ee][+-]?\\d+)?$"
             }
           },
           "required": [],
@@ -6803,7 +6803,7 @@
             },
             "limit": {
               "type": "string",
-              "pattern": "^[+-]?\\d*\\.?\\d+(?:[Ee][+-]?\\d+)?$",
+              "pattern": "^[+-]?(?:\\d+|\\d*\\.\\d+)(?:[Ee][+-]?\\d+)?$",
               "description": "Rows per page, 1 to 1000. Defaults to 100."
             },
             "cursor": {

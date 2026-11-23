@@ -55,6 +55,14 @@ export const excludedOperations = {
 
 export const schemaDialect = "https://json-schema.org/draft/2020-12/schema";
 
+const normalizedPatterns = new Map([
+  [String.raw`^(?:\/(?:[^~]|~[01])*)*$`, String.raw`^(?:\/(?:[^~]|~[01])*)?$`],
+  [
+    String.raw`^[+-]?\d*\.?\d+(?:[Ee][+-]?\d+)?$`,
+    String.raw`^[+-]?(?:\d+|\d*\.\d+)(?:[Ee][+-]?\d+)?$`,
+  ],
+]);
+
 export function createSchemaCompiler() {
   const compiler = new Ajv2020({
     strict: true,
@@ -198,6 +206,8 @@ function selfContained(
         );
       } else if (schemaArrays.has(key)) {
         result[key] = (value as Schema[]).map(copy);
+      } else if (key === "pattern" && typeof value === "string") {
+        result[key] = normalizedPatterns.get(value) ?? value;
       } else {
         result[key] = structuredClone(value);
       }
