@@ -6,6 +6,8 @@ import { validators } from "../src/generated/validators.js";
 
 const operations = selectOperations();
 const compiler = createSchemaCompiler();
+const pointerPattern = String.raw`^(?:\/(?:[^~]|~[01])*)?$`;
+const numericPattern = String.raw`^[+-]?(?:\d+|\d*\.\d+)(?:[Ee][+-]?\d+)?$`;
 
 const pointerFields = [
   ["group_by", "WebhookGroupSelector"],
@@ -49,14 +51,14 @@ function automationArgs(field: (typeof pointerFields)[number][0], body_pointer: 
 it.each(pointerFields)("advertises an unambiguous pointer pattern for %s", (_, definition) => {
   expect(inputSchema("capy_automations_create")).toHaveProperty(
     ["$defs", definition, "anyOf", "0", "properties", "body_pointer", "pattern"],
-    String.raw`^(?:\/(?:[^~]|~[01])*)?$`,
+    pointerPattern,
   );
 });
 
 it.each(queryFields)("advertises an unambiguous numeric pattern for %s %j %s", (name, _, field) => {
   expect(inputSchema(name)).toHaveProperty(
     ["properties", "query", "properties", field, "pattern"],
-    String.raw`^[+-]?(?:\d+|\d*\.\d+)(?:[Ee][+-]?\d+)?$`,
+    numericPattern,
   );
 });
 
@@ -87,25 +89,46 @@ it.each(queryFields)("preserves numeric string acceptance in both validators for
   }
 });
 
-it("validates large allowed strings and preserves the pointer length bound in a bounded process", () => {
+it("executes unambiguous patterns in both validator paths in a bounded process", () => {
   const cases = [
     ...pointerFields.flatMap(([field]) => [
-      ["capy_automations_create", automationArgs(field, "/" + "🧪".repeat(1_023)), true],
+      ["capy_automations_create", automationArgs(field, "/" + "🧪".repeat(1_023)), true, pointerPattern],
+      ["capy_automations_create", automationArgs(field, "/name/~"), false, pointerPattern],
       ["capy_automations_create", automationArgs(field, "/" + "🧪".repeat(1_024)), false],
     ]),
-    ...queryFields.map(([name, path, field]) => [
-      name,
-      { ...(path ? { path } : {}), query: { [field]: `+${"7".repeat(25_000)}e-2` } },
-      true,
+    ...queryFields.flatMap(([name, path, field]) => [
+      [name, { ...(path ? { path } : {}), query: { [field]: `+${"7".repeat(25_000)}e-2` } }, true, numericPattern],
+      [name, { ...(path ? { path } : {}), query: { [field]: "1." } }, false, numericPattern],
     ]),
   ];
-  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
     import assert from "node:assert/strict";
     import { readFileSync } from "node:fs";
+    import { createSchemaCompiler } from ${JSON.stringify(new URL("../scripts/catalog.ts", import.meta.url).href)};
+    import catalog from ${JSON.stringify(new URL("../src/generated/catalog.json", import.meta.url).href)} with { type: "json" };
     import { validators } from ${JSON.stringify(new URL("../src/generated/validators.js", import.meta.url).href)};
-    for (const [name, args, expected] of JSON.parse(readFileSync(0, "utf8"))) {
-      assert.equal(validators[name](args), expected, name);
+    const compiler = createSchemaCompiler();
+    const originalTest = RegExp.prototype.test;
+    const failures = [];
+    for (const [name, args, expected, pattern] of JSON.parse(readFileSync(0, "utf8"))) {
+      const advertised = compiler.compile(catalog.find((op) => op.name === name).inputSchema);
+      for (const [kind, check] of [["advertised", advertised], ["standalone", validators[name]]]) {
+        const seen = [];
+        RegExp.prototype.test = function (text) {
+          seen.push(this.source);
+          return originalTest.call(this, text);
+        };
+        try {
+          assert.equal(check(args), expected);
+          if (pattern) assert.deepEqual(seen, [pattern]);
+        } catch (error) {
+          failures.push(kind + " " + name + ": " + error.message);
+        } finally {
+          RegExp.prototype.test = originalTest;
+        }
+      }
     }
+    assert.deepEqual([...new Set(failures)], []);
   `], {
     input: JSON.stringify(cases),
     timeout: 2_000,
