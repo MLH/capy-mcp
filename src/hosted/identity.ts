@@ -32,9 +32,9 @@ async function identityClient(config: HostedConfig, inbound: AbortSignal): Promi
   const authenticate: client.ClientAuth = (server, metadata, body, headers) => {
     const methods = server.token_endpoint_auth_methods_supported;
     if (methods?.includes("client_secret_post")) {
-      client.ClientSecretPost(config.clientSecret)(server, metadata, body, headers);
+      return client.ClientSecretPost(config.clientSecret)(server, metadata, body, headers);
     } else if (!methods || methods.includes("client_secret_basic")) {
-      client.ClientSecretBasic(config.clientSecret)(server, metadata, body, headers);
+      return client.ClientSecretBasic(config.clientSecret)(server, metadata, body, headers);
     } else {
       throw new Error("Unsupported client authentication");
     }

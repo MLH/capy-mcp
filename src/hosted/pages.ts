@@ -55,14 +55,17 @@ export function consentComplete(redirectTo: string, providerHeaders: Headers): R
     <main><h1>Returning to your MCP client</h1><p>If your browser blocks automatic navigation, allow it or restart authorization in your client.</p></main></html>`, { headers });
 }
 
-export function accessDeniedPage(): Response {
-  return page("Access denied", `<p>This identity isn't allowed to use this Capy MCP deployment.</p>
-<p><a href="${ACCOUNT_LOGIN_PATH}">Sign in with a different identity</a></p>`, 403);
+export function accessDeniedPage(csrf: string | null): Response {
+  const response = page("Access denied", `<p>This identity isn't allowed to use this Capy MCP deployment.</p>
+<p><a href="${ACCOUNT_LOGIN_PATH}">Sign in again</a></p>${csrf ? postForm(ACCOUNT_LOGOUT_PATH, csrf, "Sign out") : ""}`, 403);
+  if (csrf) response.headers.set("Referrer-Policy", "strict-origin");
+  return response;
 }
 
 interface AccountView {
   subject: string;
   connected: boolean;
+  generation: number;
   clients: readonly { id: string; label: string; scopes: readonly string[]; grantedAt: string | null }[];
   csrf: string;
 }
@@ -73,8 +76,8 @@ function postForm(action: string, csrf: string, button: string, fields = ""): st
 <button type="submit">${escapeHtml(button)}</button></form>`;
 }
 
-export function accountPage({ subject, connected, clients, csrf }: AccountView): Response {
-  const keyInput = `<p><label for="capy-key">Capy API key</label>
+export function accountPage({ subject, connected, generation, clients, csrf }: AccountView): Response {
+  const keyInput = `<input type="hidden" name="generation" value="${generation}"><p><label for="capy-key">Capy API key</label>
 <input id="capy-key" type="password" name="key" required maxlength="${MAX_CREDENTIAL_BYTES}" autocomplete="off" spellcheck="false"></p>`;
   const grantList = clients.length ? `<ul>${clients.map(({ id, label, scopes, grantedAt }) => `<li>
 <p><strong><bdi>${escapeHtml(label)}</bdi></strong> — ${scopes.map((scope) => `<code>${escapeHtml(scope)}</code>`).join(", ")}
@@ -96,7 +99,7 @@ ${clients.length ? '<p><a href="/account?confirm=disconnect">Disconnect all clie
 ${postForm(ACCOUNT_LOGOUT_PATH, csrf, "Sign out")}</section>`);
 }
 
-type Confirmation = { kind: "delete" | "disconnect" } | { kind: "revoke"; id: string; label: string };
+type Confirmation = { kind: "delete"; generation: number } | { kind: "disconnect" } | { kind: "revoke"; id: string; label: string };
 
 export function confirmationPage(confirmation: Confirmation, csrf: string): Response {
   const [title, message, action] = confirmation.kind === "revoke"
@@ -106,5 +109,5 @@ export function confirmationPage(confirmation: Confirmation, csrf: string): Resp
       ? ["Remove Capy key", "Remove the key from this deployment and disconnect all clients. This does not revoke the key in Capy.", "/account/key/delete"]
       : ["Disconnect all clients", "Disconnect every MCP client. The Capy key and this browser session are unchanged.", "/account/disconnect"];
   return page(title, `<p>${message} Clients must request authorization again. Calls already in flight cannot be undone.</p>
-${postForm(action, csrf, title)}<p><a href="/account">Cancel</a></p>`);
+${postForm(action, csrf, title, confirmation.kind === "delete" ? `<input type="hidden" name="generation" value="${confirmation.generation}">` : "")}<p><a href="/account">Cancel</a></p>`);
 }

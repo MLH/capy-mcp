@@ -33,6 +33,40 @@ async function connected(store: ReturnType<typeof createStore>, subject: string)
 beforeEach(resetHostedDb);
 
 describe("accounts and encrypted credentials", () => {
+  it("reclaims one bounded batch of expired sessions and logins on insertion, preserving live bindings", async () => {
+    const store = createStore(env.DB);
+    const account = await store.getOrCreateAccount(identity("sweep"));
+    const hash = "0".repeat(64);
+    const future = Date.now() + 60_000;
+    const ids = "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<40)";
+    await env.DB.batch([
+      env.DB.prepare(ids + " INSERT INTO browser_sessions SELECT printf('%064x',i), ?, ?, 0 FROM n").bind(account.id, hash),
+      env.DB.prepare(ids + " INSERT INTO login_transactions SELECT printf('%064x',i), ?, 'v', 'n', NULL, 0 FROM n").bind(hash),
+    ]);
+    await store.createSession("live-session", { accountId: account.id, csrfHash: hash, expiresAt: future });
+    const live = { stateHash: await hashOpaqueId("live-login"), browserHash: hash, nonce: "nonce", verifier: "verifier", continuation: null, expiresAt: future };
+    await store.createLogin(live);
+    for (const table of ["login_transactions", "browser_sessions"]) {
+      expect(await env.DB.prepare("SELECT count(*) AS n FROM " + table + " WHERE expires_at=0").first("n")).toBe(8);
+    }
+    expect(await store.getSession("live-session")).not.toBeNull();
+    expect(await store.consumeLogin(live.stateHash, "wrong-binding")).toBeNull();
+    expect(await store.consumeLogin(live.stateHash, hash)).toEqual(live);
+  });
+
+  it("leaves excess revoked grants eligible after one cleanup budget", async () => {
+    const store = createStore(env.DB);
+    const { account, record } = await connected(store, "cleanup");
+    for (let i = 0; i < 12; i++) expect(await store.createGrant({ ...record, id: "g"+i, providerGrantId: "p"+i }, 1, 0)).toBe(true);
+    await store.disconnectAll(account.id);
+    const cleared = new Set<string>();
+    const revoke = async (id: string) => { cleared.add(id); };
+    await store.cleanupRevoked(account.id, revoke);
+    expect(cleared.size).toBe(8);
+    await store.cleanupRevoked(account.id, revoke);
+    expect(cleared.size).toBe(12);
+  });
+
   it("claims the pending app grant only once for competing code exchanges", async () => {
     const store = createStore(env.DB);
     const { account, record } = await connected(store, "one-shot");
@@ -122,14 +156,16 @@ describe("accounts and encrypted credentials", () => {
     const store = createStore(env.DB);
     const { account, envelope, record } = await connected(store, "first");
     expect(await store.createGrant(record, 1, 0)).toBe(true);
-    expect(await store.deleteCredential(account.id)).toBe(true);
-    expect(await store.deleteCredential(account.id)).toBe(false);
+    expect(await store.deleteCredential(account.id, 1)).toBe(true);
+    expect(await store.deleteCredential(account.id, 2)).toBe(false);
     expect(await env.DB.prepare("SELECT * FROM credentials").first()).toBeNull();
     expect(await store.getAccount(account.id)).toMatchObject({ credentialVersion: 2 });
     expect(await store.getAuthorizedCredential(account.id, record.id, 1, 0)).toBeNull();
     expect(await store.putCredential(account.id, envelope, 0)).toBe(false);
     const reconnected = await encryptCredential("fake-new-key", account.id, 3, fakeEncryption());
     expect(await store.putCredential(account.id, reconnected, 2)).toBe(true);
+    expect(await store.deleteCredential(account.id, 1)).toBe(false);
+    expect(await store.getAccountConnection(account.id)).toMatchObject({ generation: 3, connected: true });
     expect(await store.getAuthorizedCredential(account.id, record.id, 1, 0)).toBeNull();
   });
 });

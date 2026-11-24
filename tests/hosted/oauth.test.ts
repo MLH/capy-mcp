@@ -3,6 +3,7 @@ import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import worker from "../../src/worker.js";
 import { hostedEnv } from "./fixtures.js";
 import { clientFlow, completionTarget, redirect, resource, serveHosted } from "./oauth-flow.js";
+import { signedIdToken, signingJwk } from "./fixtures/oidc-signing.js";
 import { signingKey } from "./fake-issuer.js";
 import { resetHostedDb } from "./setup.js";
 import { createStore } from "../../src/hosted/store.js";
@@ -11,6 +12,30 @@ let keys: CryptoKeyPair;
 beforeAll(async () => { keys = await signingKey(); });
 beforeEach(resetHostedDb);
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+it.each(["withdrawn", "unconfigured"])("lets only the current browser sign out from a fresh %s account page", async kind => {
+  const flow = await clientFlow(keys);
+  await flow.signIn();
+  const original = { ...flow.env };
+  flow.env.OIDC_ALLOWED_SUBJECTS = '["no-member"]';
+  if (kind === "unconfigured") Object.assign(flow.env, {
+    OIDC_ALLOWED_SUBJECTS: "", OIDC_ADMISSION_CLAIM: "", OIDC_ALLOWED_CLAIM_VALUES: "",
+    CREDENTIAL_ENCRYPTION_KEY: "", OIDC_CLIENT_SECRET: "", OIDC_ISSUER: "",
+  });
+  const denied = await flow.visit("/account");
+  expect(denied.status).toBe(403);
+  const html = await denied.text();
+  expect(html.match(/<form[^>]*action="([^"]+)"/g)).toEqual(['<form method="post" action="/auth/logout"']);
+  expect(denied.headers.get("Referrer-Policy")).toBe("strict-origin");
+  const csrf = html.match(/name="csrf" value="([^"]+)"/)![1];
+  const originalCookies = new Map(flow.cookies);
+  expect((await flow.visit("/account/key", flow.form({ key: "fixture", generation: "0" }))).status).toBeGreaterThanOrEqual(400);
+  expect((await flow.visit("/auth/logout", new URLSearchParams({ csrf: "wrong" }))).status).toBe(403);
+  expect((await flow.visit("/auth/logout", new URLSearchParams({ csrf }))).status).toBe(303);
+  Object.assign(flow.env, original);
+  for (const [key, value] of originalCookies) flow.cookies.set(key, value);
+  expect((await flow.visit("/account")).status).toBe(401);
+});
 
 it("fails closed on a metadata provider exception and emits only a fixed warning", async () => {
   const flow = await clientFlow(keys);
@@ -25,6 +50,27 @@ it("fails closed on a metadata provider exception and emits only a fixed warning
   expect(warning.mock.calls.length).toBe(1);
   expect(JSON.stringify(warning.mock.calls).includes("sentinel")).toBe(false);
   expect(warning).toHaveBeenCalledWith("CIMD fetch failed");
+});
+
+it.each(["/token", "/register"])("makes only public %s failures readable without browser credentials", async path => {
+  const origin = "https://client.example.invalid";
+  const check = async (env: Env, fields: URLSearchParams, status: number, error: string) => {
+    const response = await serveHosted(new Request(env.PUBLIC_ORIGIN + path, { method: "POST", headers: { Origin: origin }, body: fields }), env);
+    expect(response.status).toBe(status);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+    expect(response.headers.get("Vary")).toContain("Origin");
+    expect(response.headers.has("Access-Control-Allow-Credentials")).toBe(false);
+    expect(await response.json()).toEqual({ error });
+  };
+  const env = hostedEnv();
+  await check(env, new URLSearchParams({ field: "x".repeat(33_000) }), 413, "invalid_request");
+  await check(hostedEnv({ AUTH_RATE_LIMITER: { limit: async () => ({ success: false }) } }), new URLSearchParams(), 429, "temporarily_unavailable");
+  await check(hostedEnv({ OIDC_CLIENT_SECRET: "" }), new URLSearchParams(), 503, "server_error");
+  if (path === "/token") await check(env, new URLSearchParams({ grant_type: "refresh_token" }), 400, "invalid_target");
+  for (const local of ["/account", "/authorize", "/consent", "/mcp"]) {
+    const response = await serveHosted(new Request(env.PUBLIC_ORIGIN + local, { headers: { Origin: origin } }), env);
+    expect(response.headers.has("Access-Control-Allow-Origin")).toBe(false);
+  }
 });
 
 it("fails closed before registration when the limiter throws without exposing its error", async () => {
@@ -89,6 +135,39 @@ it("requires fresh consent if issuance fails after the D1 code claim", async () 
   expect(await retried.json()).toMatchObject({ error: "invalid_grant" });
 });
 
+it.each([200, 302, 206])("authenticates a signed client only with direct HTTP 200 keys (status %i)", async status => {
+  const flow = await clientFlow(keys);
+  await flow.onboard("fixture-key");
+  const client = "https://signed.example.invalid/metadata";
+  const jwks = "https://signed.example.invalid/keys";
+  const pair = await signingKey();
+  const publicKey = await signingJwk(pair.publicKey);
+  let mode: RequestRedirect | undefined;
+  vi.stubGlobal("fetch", async (input: string, init: RequestInit) => {
+    if (input === client) return Response.json({ client_id: client, client_name: "Signed fixture",
+      redirect_uris: [redirect], token_endpoint_auth_method: "private_key_jwt", jwks_uri: jwks });
+    if (input !== jwks) throw new Error("Unexpected fixture request");
+    mode = init.redirect;
+    return status === 302 ? Response.redirect("https://other.example.invalid/keys") : Response.json({ keys: [publicKey] }, { status });
+  });
+  const decision = await flow.decide(await flow.authorize({ client_id: client }));
+  const code = completionTarget(decision).searchParams.get("code")!;
+  const client_assertion = await signedIdToken(pair.privateKey, {
+    iss: client, sub: client, aud: flow.env.PUBLIC_ORIGIN + "/token", exp: Math.floor(Date.now()/1000) + 60, jti: crypto.randomUUID(),
+  });
+  const exchanged = await flow.exchange(code, { client_id: client, client_assertion,
+    client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" });
+  const body = await exchanged.json<{ access_token?: string; error?: string }>();
+  if (status === 200) {
+    expect(exchanged.status).toBe(200);
+    expect(typeof body.access_token).toBe("string");
+  } else {
+    expect(body.error).toBe("invalid_client");
+    expect(body.access_token).toBeUndefined();
+  }
+  expect(mode).toBe("manual");
+});
+
 it("requires exactly HTTP 200 even for a parseable client metadata document", async () => {
   const flow = await clientFlow(keys);
   await flow.onboard("fixture-key");
@@ -104,7 +183,7 @@ it("does not apply a stale connect-only onboarding form to a now-connected accou
   const { resume } = await flow.signIn();
   const page = await flow.visit(resume);
   const action = (await page.text()).match(/action="(\/account\/key[^"]*)"/)![1];
-  expect((await flow.visit("/account/key", flow.form({ key: "current-key" }))).status).toBe(303);
+  expect((await flow.visit("/account/key", flow.form({ key: "current-key", generation: "0" }))).status).toBe(303);
   const allowed = await flow.decide(await flow.authorize());
   expect((await flow.exchange(completionTarget(allowed).searchParams.get("code")!)).status).toBe(200);
   const owner = await flow.env.DB.prepare("SELECT id FROM accounts").first<string>("id");
@@ -126,7 +205,7 @@ it.each(["expired", "foreign", "consumed", "generation", "expires-during-validat
   if (kind === "consumed" || kind === "generation") {
     expect((await flow.visit(action, flow.form({ key: "fixture-current" }))).status).toBe(303);
     if (kind === "consumed") expect((await flow.visit(resume)).status).toBe(200);
-    expect((await flow.visit("/account/key/delete", flow.form({}))).status).toBe(303);
+    expect((await flow.visit("/account/key/delete", flow.form({ generation: "1" }))).status).toBe(303);
   }
   const poster = kind === "foreign" ? await clientFlow(keys, "other-member") : flow;
   if (poster !== flow) await poster.signIn();
@@ -200,7 +279,7 @@ it("binds the callback and resume to the original browser session", async () => 
 it.each(["/account/key", "/account/disconnect"])("will not grant from a consent page opened before %s", async path => {
   const flow = await clientFlow(keys);
   const page = await flow.onboard("fixture-key");
-  expect((await flow.visit(path, flow.form({ key: "fixture-replacement" }))).status).toBe(303);
+  expect((await flow.visit(path, flow.form({ key: "fixture-replacement", generation: "1" }))).status).toBe(303);
   const stale = await flow.decide(page);
   expect(stale.status).toBe(409);
   expect(stale.headers.has("Location")).toBe(false);
@@ -272,10 +351,27 @@ it("keeps browser mutations out of public discovery preflight", async () => {
 
 it("rejects modified consent fields and invalid scopes, PKCE or resource indicators", async () => {
   const flow = await clientFlow(keys);
-  const invalid: Record<string, string>[] = [{ scope: "capy:admin" }, { code_challenge_method: "plain" },
-    { code_challenge: "" }, { resource: resource + "/" }, { resource: "" }, { redirect_uri: redirect + "/other" }];
-  for (const override of invalid) {
-    expect((await flow.authorize(override)).status).toBe(400);
+  const invalid: [Record<string, string>, string][] = [
+    [{ scope: "capy:admin" }, "invalid_scope"], [{ code_challenge_method: "plain" }, "invalid_request"],
+    [{ code_challenge: "" }, "invalid_request"], [{ code_challenge: "short" }, "invalid_request"],
+    [{ resource: resource + "/" }, "invalid_target"], [{ resource: "" }, "invalid_target"],
+    [{ response_type: "unsupported" }, "unsupported_response_type"],
+  ];
+  for (const [override, code] of invalid) {
+    const response = await flow.authorize(override);
+    const target = completionTarget(response);
+    expect(target.origin + target.pathname).toBe(redirect);
+    expect(Object.fromEntries(target.searchParams)).toEqual({ error: code, state: "client-state", iss: flow.env.PUBLIC_ORIGIN });
+    expect(response.headers.has("Location")).toBe(false);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+    expect(await response.text()).not.toMatch(/client-state|example\.invalid/);
+  }
+  const unknown: Record<string, string>[] = [{ redirect_uri: redirect + "/other" }, { client_id: "unknown-client" }];
+  for (const override of unknown) {
+    const local = await flow.authorize(override);
+    expect(local.status).toBe(400);
+    expect(local.headers.has("Location") || local.headers.has("Refresh")).toBe(false);
   }
   const page = await flow.onboard("fixture-key");
   const handle = (await page.clone().text()).match(/name="handle" value="([^"]+)"/)![1];

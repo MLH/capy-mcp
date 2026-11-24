@@ -1,4 +1,4 @@
-import { AuthorizationError, GrantType, OAuthError, OAuthProvider, type OAuthHelpers, type OAuthResourceContext } from "./generated-provider/oauth-provider.js";
+import { AuthorizationError, authorizationErrorRedirect, getOAuthApi, GrantType, OAuthError, OAuthProvider, type OAuthHelpers, type OAuthProviderOptions, type OAuthResourceContext } from "./generated-provider/oauth-provider.js";
 import { beginLogin, browserResponse, csrfToken, finishLogin, logout, requireMutation, requireSession } from "./browser.js";
 import { handleAccount } from "./account.js";
 import { connectForConsent, consentComplete, consentPage } from "./pages.js";
@@ -59,11 +59,12 @@ export async function handleAuthorization(request: Request, env: Env, oauth: OAu
   const id = url.searchParams.get("transaction");
   let auth;
   if (url.pathname === "/authorize") {
-    if (url.searchParams.size > 32 || [...url.searchParams.keys()].some(k => url.searchParams.getAll(k).length !== 1) ||
-        url.searchParams.get("resource") !== env.PUBLIC_ORIGIN + "/mcp") return problem(400);
+    if (url.searchParams.size > 32 || [...url.searchParams.keys()].some(k => url.searchParams.getAll(k).length !== 1)) return problem(400);
     auth = await oauth.parseAuthRequest(request);
-    if (auth.codeChallengeMethod !== "S256" || !/^[\w-]{43}$/.test(auth.codeChallenge ?? "") ||
-        auth.scope.some(s => !scopes.includes(s))) return problem(400);
+    const error = url.searchParams.get("resource") !== env.PUBLIC_ORIGIN + "/mcp" ? "invalid_target" :
+      auth.codeChallengeMethod !== "S256" || !/^[\w-]{43}$/.test(auth.codeChallenge ?? "") ? "invalid_request" :
+      auth.scope.some(s => !scopes.includes(s)) ? "invalid_scope" : null;
+    if (error) return consentComplete(authorizationErrorRedirect(auth, error), new Headers());
     auth.scope = [...new Set(["capy:read", ...auth.scope])];
     if (user instanceof Response) {
       const transactionId = await pending.start(auth, null);
@@ -98,26 +99,60 @@ export async function handleAuthorization(request: Request, env: Env, oauth: OAu
   return page;
 }
 
-async function browserRoutes(request: Request, env: Env): Promise<Response> {
+async function cleanupGrants(env: Env, accountId: string) {
+  const deadline = Date.now() + 5_000;
+  let remaining = 48;
+  const deletes: Promise<void>[] = [];
+  function spend() {
+    if (Date.now() >= deadline || remaining === 0) throw new Error("Cleanup budget exhausted");
+    remaining--;
+  }
+  const kv = new Proxy(env.OAUTH_KV, { get(target, key) {
+    if (key === "list") return (options: KVNamespaceListOptions) => {
+      spend();
+      if (remaining < 2) throw new Error("Cleanup budget exhausted");
+      return target.list({ ...options, limit: Math.min(options.limit ?? 8, 8, remaining - 1) });
+    };
+    if (key === "delete") return (id: string) => {
+      spend();
+      const deleting = target.delete(id);
+      deletes.push(deleting);
+      return deleting;
+    };
+    throw new Error("Unsupported cleanup operation");
+  } });
+  const oauth = getOAuthApi(hostedOptions(env), { ...env, OAUTH_KV: kv });
+  try {
+    await createStore(env.DB).cleanupRevoked(accountId, (id, user) => oauth.revokeGrant(id, user));
+  } finally {
+    await Promise.allSettled(deletes);
+  }
+}
+
+async function browserRoutes(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const path = new URL(request.url).pathname;
   const oauth = (env as Env & { OAUTH_PROVIDER: OAuthHelpers }).OAUTH_PROVIDER;
   if (path === "/auth/login") return beginLogin(request, env, { kind: "account" });
   if (path === "/auth/callback") return finishLogin(request, env);
   if (path === "/auth/logout") return logout(request, env);
-  if (path === "/account" || path.startsWith("/account/")) return handleAccount(request, env, (id, user) => oauth.revokeGrant(id, user));
+  if (path === "/account" || path.startsWith("/account/")) return handleAccount(request, env, accountId => {
+    ctx.waitUntil(cleanupGrants(env, accountId).catch(() => {}));
+  });
   if (path === "/authorize" || path === "/oauth/resume" || path === "/consent") {
     try {
       return await handleAuthorization(request, env, oauth);
     } catch (error) {
-      return problem(error instanceof AuthorizationError ? 400 : 503);
+      if (!(error instanceof AuthorizationError)) return problem(503);
+      if (!error.redirectTo || !error.redirectUri) return problem(400);
+      return consentComplete(authorizationErrorRedirect({ redirectUri: error.redirectUri, state: error.state, issuer: error.issuer }, error.code), new Headers());
     }
   }
   return new Response("Not found", { status: 404 });
 }
 
-export function createHostedProvider(env: Env): OAuthProvider<Env> {
+function hostedOptions(env: Env): OAuthProviderOptions<Env> {
   const resource = env.PUBLIC_ORIGIN + "/mcp";
-  return new OAuthProvider<Env>({
+  return {
     apiRoute: resource,
     apiHandler: { fetch: (request, bindings, ctx) => handleMcp(request, bindings, ctx as OAuthResourceContext<unknown>) },
     defaultHandler: { fetch: browserRoutes },
@@ -139,5 +174,9 @@ export function createHostedProvider(env: Env): OAuthProvider<Env> {
       if (grantType === GrantType.AUTHORIZATION_CODE && !requestedScope.includes("offline_access")) return { refreshTokenTTL: 0 };
     },
     onError: () => {},
-  });
+  };
+}
+
+export function createHostedProvider(env: Env): OAuthProvider<Env> {
+  return new OAuthProvider(hostedOptions(env));
 }

@@ -19,6 +19,8 @@ function replaceOnce(source, before, after) {
 }
 let patched = replaceOnce(js, "return fetch(metadataUrl, {", 'return fetch(metadataUrl, {\n\t\tredirect: "manual",');
 patched = replaceOnce(patched, "if (!response.ok) {\n\t\t\tawait response.body?.cancel()", "if (response.status !== 200) {\n\t\t\tawait response.body?.cancel()");
+patched = replaceOnce(patched, "const response = await fetch(issuer.jwksUri, {", 'const response = await fetch(issuer.jwksUri, {\n\t\t\t\tredirect: "manual",');
+patched = replaceOnce(patched, 'if (!response.ok) return err({\n\t\t\t\treason: "jwks_fetch_failed"', 'if (response.status !== 200) return err({\n\t\t\t\treason: "jwks_fetch_failed"');
 const revoke = "if (grantData.clientId !== clientInfo.clientId) return false;\n\t\tawait this.createOAuthHelpers(env).revokeGrant(grantId, userId);";
 patched = replaceOnce(patched, revoke, revoke.replace("await this.createOAuthHelpers", "await this.options.onVerifiedRefreshRevocation?.({ userId, grantId, clientId: clientInfo.clientId, env });\n\t\tawait this.createOAuthHelpers"));
 const diagnostics = [

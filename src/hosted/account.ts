@@ -1,6 +1,6 @@
 import { selectOperations } from "../catalog.js";
 import { callCapy, CapyError } from "../client.js";
-import { browserResponse, csrfToken, requireMutation, requireSession } from "./browser.js";
+import { browserResponse, csrfToken, requireMutation, requireSession, signOutFormToken } from "./browser.js";
 import { parseHostedConfig } from "./config.js";
 import { encryptCredential, isCredentialKey } from "./crypto.js";
 import { accessDeniedPage, accountPage, confirmationPage, signInPage } from "./pages.js";
@@ -25,16 +25,20 @@ async function showAccount(request: Request, env: Env, url: URL): Promise<Respon
   if (user instanceof Response) {
     if (url.origin === env.PUBLIC_ORIGIN) {
       if (user.status === 401) return signInPage();
-      if (user.status === 403) return accessDeniedPage();
+      if (user.status === 403 || user.status === 503 && request.url === env.PUBLIC_ORIGIN + "/account") {
+        const csrf = await signOutFormToken(request, env);
+        if (csrf || user.status === 403) return accessDeniedPage(csrf);
+      }
     }
     return user;
   }
 
   const csrf = await csrfToken(request, user.session);
   if (csrf === null) return problem(403, "Sign in again to manage your account.");
-  const { connected, clients } = await createStore(env.DB).getAccountConnection(user.account.id);
+  const { connected, clients, generation } = await createStore(env.DB).getAccountConnection(user.account.id);
   const confirmation = url.searchParams.get("confirm");
-  if (confirmation === "delete" || confirmation === "disconnect") return confirmationPage({ kind: confirmation }, csrf);
+  if (confirmation === "delete") return confirmationPage({ kind: "delete", generation }, csrf);
+  if (confirmation === "disconnect") return confirmationPage({ kind: confirmation }, csrf);
   if (confirmation === "revoke") {
     const grant = clients.find(({ id }) => id === url.searchParams.get("grant"));
     if (!grant) return problem(404, "Client grant not found.");
@@ -42,7 +46,7 @@ async function showAccount(request: Request, env: Env, url: URL): Promise<Respon
   }
   return accountPage({
     subject: user.account.identity.subject,
-    connected,
+    connected, generation,
     clients: clients.map(({ id, label, scopes, createdAt }) => ({
       id, label, scopes, grantedAt: createdAt === null ? null : new Date(createdAt).toISOString(),
     })),
@@ -50,7 +54,7 @@ async function showAccount(request: Request, env: Env, url: URL): Promise<Respon
   });
 }
 
-export async function handleAccount(request: Request, env: Env, revokeProviderGrant?: (id: string, user: string) => Promise<void>): Promise<Response> {
+export async function handleAccount(request: Request, env: Env, scheduleCleanup?: (accountId: string) => void): Promise<Response> {
   try {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -68,6 +72,15 @@ export async function handleAccount(request: Request, env: Env, revokeProviderGr
     const store = createStore(env.DB);
     let destination = "/account";
 
+    let generation: number | null = null;
+    if (path === "/account/key/delete" || path === "/account/key" && !url.searchParams.has("transaction")) {
+      const [value, ...duplicates] = form.getAll("generation");
+      if (duplicates.length || !/^(?:0|[1-9][0-9]*)$/.test(value ?? "") || !Number.isSafeInteger(Number(value))) {
+        return problem(400, "Invalid connection generation.");
+      }
+      generation = Number(value);
+      if (generation !== account.credentialVersion) return problem(409, "The Capy connection changed. Reload and try again.");
+    }
     if (path === "/account/key") {
       const [key, ...duplicates] = form.getAll("key");
       if (key === undefined || duplicates.length || !isCredentialKey(key)) return problem(400, "Enter a valid Capy API key.");
@@ -75,7 +88,7 @@ export async function handleAccount(request: Request, env: Env, revokeProviderGr
       const id = url.searchParams.get("transaction");
       if (id !== null && (!/^[0-9a-f-]{36}$/.test(id) || url.searchParams.size !== 1)) return problem(400, "Invalid connection request.");
       const pending = transactions(env.DB);
-      const expected = id === null ? account.credentialVersion : await pending.onboardingVersion(id, user.session.csrfHash, account.id);
+      const expected = id === null ? generation : await pending.onboardingVersion(id, user.session.csrfHash, account.id);
       if (expected === null) return problem(409, "Connection request expired or changed. Start again.");
       const config = parseHostedConfig(env);
       try {
@@ -93,14 +106,14 @@ export async function handleAccount(request: Request, env: Env, revokeProviderGr
       if (!saved) return problem(409, "The Capy connection changed. Reload and try again.");
       if (id !== null) destination = "/oauth/resume?transaction=" + id;
     } else if (path === "/account/key/delete") {
-      if (!await store.deleteCredential(account.id)) return problem(409, "No Capy key to remove.");
+      if (!await store.deleteCredential(account.id, generation!)) return problem(409, "No Capy key to remove.");
     } else if (revoke) {
       if (!await store.revokeGrant(account.id, revoke[1])) return problem(404, "Client grant not found.");
     } else if (!await store.disconnectAll(account.id)) {
       return problem(409, "The account changed. Reload and try again.");
     }
 
-    if (revokeProviderGrant) await store.cleanupRevoked(account.id, revokeProviderGrant).catch(() => {});
+    scheduleCleanup?.(account.id);
     return browserResponse(null, { status: 303, headers: { Location: destination } });
   } catch {
     return problem(503, "Account operation unavailable.");

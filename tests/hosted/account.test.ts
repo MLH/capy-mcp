@@ -91,13 +91,43 @@ afterEach(() => {
 });
 
 describe("hosted account", () => {
+  it("binds both ordinary forms and a removal confirmation to their rendered generations", async () => {
+    const owner = await signIn();
+    const version = async (path: string) => {
+      const html = await (await get(path, owner.cookie)).text();
+      const match = html.match(/name="generation" value="(\d+)"/);
+      expect(match).not.toBeNull();
+      return match![1];
+    };
+    fakeCapy(() => Response.json({ projects: [] }));
+    const save = (generation: string) => post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, generation });
+    const remove = (generation: string) => post("/account/key/delete", owner.cookie, { csrf: owner.csrf, generation });
+    const [first, second] = await Promise.all([version("/account"), version("/account")]);
+    expect((await save(first)).status).toBe(303);
+    expect((await save(second)).status).toBe(409);
+    const confirmation = await version("/account?confirm=delete");
+    expect((await remove(confirmation)).status).toBe(303);
+    expect((await save(await version("/account"))).status).toBe(303);
+    expect((await remove(confirmation)).status).toBe(409);
+    expect((await store.getAccount(owner.account.id))?.credentialVersion).toBe(3);
+    expect((await store.getAccountConnection(owner.account.id)).connected).toBe(true);
+  });
+
+  it.each(["", "&generation=", "&generation=-1", "&generation=1e0", "&generation=00", "&generation=9007199254740992", "&generation=0&generation=0"])(
+    "rejects an absent or noncanonical generation before validation (%#)", async suffix => {
+      const owner = await signIn();
+      const body = new URLSearchParams({ csrf: owner.csrf, key: newKey }).toString() + suffix;
+      for (const path of ["/account/key", "/account/key/delete"]) expect((await post(path, owner.cookie, body)).status).toBe(400);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
   it("rejects invented onboarding transactions before validating or writing a key", async () => {
     const owner = await signIn();
     fakeCapy(() => Response.json({ projects: [] }));
     const response = await post("/account/key?transaction=" + crypto.randomUUID(), owner.cookie, { csrf: owner.csrf, key: newKey });
     expect(response.status).toBe(409);
     expect(fetch).not.toHaveBeenCalled();
-    expect(await store.getAccountConnection(owner.account.id)).toEqual({ connected: false, clients: [] });
+    expect(await store.getAccountConnection(owner.account.id)).toEqual({ generation: 0, connected: false, clients: [] });
   });
   it("shows only sign-in to unauthenticated visitors and denies their writes", async () => {
     const page = await get("/account");
@@ -118,7 +148,7 @@ describe("hosted account", () => {
     const page = await get("/account", owner.cookie);
     expect(page.status).toBe(403);
     const html = await page.text();
-    expect(html).not.toContain("<form");
+    expect(html.match(/<form[^>]*action="([^"]+)"/g)).toEqual(['<form method="post" action="/auth/logout"']);
     expect(html).not.toContain(ownGrant.clientId);
     for (const path of ["/account/key", "/account/key/delete", `/account/grants/${ownGrant.id}/revoke`, "/account/disconnect"]) {
       expect((await post(path, owner.cookie, { csrf: owner.csrf, key: newKey })).status).toBe(403);
@@ -141,9 +171,9 @@ describe("hosted account", () => {
 
     expect((await post(`/account/grants/${otherGrant.id}/revoke`, owner.cookie, { csrf: owner.csrf })).status).toBe(404);
     expect((await get(`/account?confirm=revoke&grant=${otherGrant.id}`, owner.cookie)).status).toBe(404);
-    expect((await post("/account/key/delete", owner.cookie, { csrf: owner.csrf, ...selector })).status).toBe(409);
+    expect((await post("/account/key/delete", owner.cookie, { csrf: owner.csrf, generation: "0", ...selector })).status).toBe(409);
     fakeCapy(() => Response.json({ projects: [] }));
-    expect((await post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, ...selector })).status).toBe(303);
+    expect((await post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, generation: "0", ...selector })).status).toBe(303);
     expect(await store.getAccount(owner.account.id)).toMatchObject({ credentialVersion: 1 });
     const authorized = await authorize(otherGrant);
     expect(authorized).not.toBeNull();
@@ -232,8 +262,8 @@ describe("hosted account", () => {
     "rejects a missing, malformed, oversized or duplicated key before fetch (case %#)", async (key) => {
       const owner = await signIn();
       const body = key === "fake&key=duplicate"
-        ? `csrf=${owner.csrf}&key=${key}`
-        : new URLSearchParams({ csrf: owner.csrf, key }).toString();
+        ? `csrf=${owner.csrf}&generation=0&key=${key}`
+        : new URLSearchParams({ csrf: owner.csrf, generation: "0", key }).toString();
       const response = await post("/account/key", owner.cookie, body);
       expect(response.status).toBe(400);
       expect(await store.getAccount(owner.account.id)).toMatchObject({ credentialVersion: 0 });
@@ -251,7 +281,7 @@ describe("hosted account", () => {
     const warn = vi.spyOn(console, "warn");
     const error = vi.spyOn(console, "error");
 
-    const result = await post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey });
+    const result = await post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, generation: "1" });
     expect(result.status).toBe(422);
     expect(result.headers.get("Location")).toBeNull();
     const body = await result.text();
@@ -273,7 +303,7 @@ describe("hosted account", () => {
       started.resolve();
       return new Promise(() => {});
     });
-    const posted = post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey });
+    const posted = post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, generation: "1" });
     await Promise.race([
       started.promise,
       posted.then(() => { throw new Error("Key validation never called Capy"); }),
@@ -294,7 +324,7 @@ describe("hosted account", () => {
       return Response.json({ projects: [] });
     });
     const result = await handleAccount(
-      postRequest("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey }, origin, controller.signal), env,
+      postRequest("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, generation: "0" }, origin, controller.signal), env,
     );
     expect(result.status).toBe(503);
     expect(capy.mock.calls[0][1]?.signal?.aborted).toBe(true);
@@ -317,7 +347,7 @@ describe("hosted account", () => {
     const log = vi.spyOn(console, "log");
     const warn = vi.spyOn(console, "warn");
     const error = vi.spyOn(console, "error");
-    const result = await post("/account/key?return=https://other.invalid", owner.cookie, { csrf: owner.csrf, key: newKey });
+    const result = await post("/account/key?return=https://other.invalid", owner.cookie, { csrf: owner.csrf, key: newKey, generation: "1" });
     expect(result.status).toBe(303);
     expect(result.headers.get("Location")).toBe("/account");
     expect(await result.text()).toBe("");
@@ -335,13 +365,13 @@ describe("hosted account", () => {
     expect(await (await get("/account", owner.cookie)).text()).not.toContain(newKey);
     const secondGrant = await grant({ ...owner.account, credentialVersion: 1 });
 
-    const deleted = await post("/account/key/delete", owner.cookie, { csrf: owner.csrf });
+    const deleted = await post("/account/key/delete", owner.cookie, { csrf: owner.csrf, generation: "2" });
     expect(deleted.status).toBe(303);
     expect(await authorize(secondGrant)).toBeNull();
     expect((await env.DB.prepare("SELECT COUNT(*) AS count FROM credentials").first<{ count: number }>())?.count).toBe(0);
     expect(await (await get("/account", owner.cookie)).text()).toContain("No Capy key connected");
 
-    expect((await post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey })).status).toBe(303);
+    expect((await post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, generation: "3" })).status).toBe(303);
     expect(await store.getAccount(owner.account.id)).toMatchObject({ credentialVersion: 4 });
     expect(await authorize(firstGrant)).toBeNull();
     expect(await authorize(secondGrant)).toBeNull();
@@ -355,7 +385,7 @@ describe("hosted account", () => {
       started.resolve();
       return validated.promise;
     });
-    const pending = post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey });
+    const pending = post("/account/key", owner.cookie, { csrf: owner.csrf, key: newKey, generation: "0" });
     await Promise.race([
       started.promise,
       pending.then(() => { throw new Error("Key validation never called Capy"); }),

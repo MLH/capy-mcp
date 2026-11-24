@@ -33,15 +33,16 @@ export async function browserIssuer(profile, listen, origin) {
           <main><h1>Fixture identity provider</h1><form method="post">
           <button formaction="/rejected">Use non-admitted identity</button>
           <button formaction="/approved">Use admitted identity</button>
+          <button formaction="/withdrawn">Use identity after admission withdrawal</button>
           </form></main></html>`);
         return;
       }
     }
-    if (pending && req.method === "POST" && ["/approved", "/rejected"].includes(url.pathname)) {
+    if (pending && req.method === "POST" && ["/approved", "/rejected", "/withdrawn"].includes(url.pathname)) {
       const code = randomBytes(32).toString("base64url");
       const { state, ...flow } = pending;
       pending = undefined;
-      codes.set(code, { ...flow, member: url.pathname === "/approved" });
+      codes.set(code, { ...flow, subject: url.pathname === "/rejected" ? "demo-visitor" : "demo-member", withdrawn: url.pathname === "/withdrawn" });
       const callback = new URL(redirect);
       callback.search = new URLSearchParams({ code, state });
       res.writeHead(303, { Location: callback.href, "Referrer-Policy": "no-referrer" });
@@ -79,8 +80,8 @@ export async function browserIssuer(profile, listen, origin) {
         const now = Math.floor(Date.now() / 1000);
         issued++;
         return Response.json({ id_token: await signedIdToken(keys.privateKey, {
-          iss: issuer, aud: clientId, sub: flow.member ? "demo-member" : "demo-visitor",
-          nonce: flow.nonce, iat: now, exp: now + 300, hd: "team.example.invalid",
+          iss: issuer, aud: clientId, sub: flow.subject,
+          nonce: flow.nonce, iat: now, exp: now + 300, hd: flow.withdrawn ? "outside.example.invalid" : "team.example.invalid",
         }), token_type: "Bearer", access_token: randomBytes(32).toString("base64url") });
       }
       throw new Error("Unexpected outbound issuer request");

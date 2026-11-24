@@ -10,19 +10,21 @@ import { setTimeout as delay } from "node:timers/promises";
 import { convertV4MiniflareOptions, Miniflare, Response as MfResponse } from "miniflare";
 import { unstable_splitSqlQuery } from "wrangler";
 import { browserIssuer } from "./fixtures/browser-issuer.mjs";
-import { watchBrowser } from "./fixtures/browser-lifecycle.ts";
+import { openBrowserTab, watchBrowser } from "./fixtures/browser-lifecycle.ts";
 
 const callbacks = new Map();
+let callbackArrivals = 0, callbackPrivacyViolation = false;
 const receiver = (req, res) => {
   const url = new URL(req.url, "http://localhost");
   if (url.pathname === "/callback") {
+    callbackArrivals++;
+    callbackPrivacyViolation ||= req.headers.referer !== undefined || req.headers.cookie !== undefined;
     const allowed = Boolean(url.searchParams.get("code")) && !url.searchParams.has("error");
     const denied = !url.searchParams.has("code") && url.searchParams.get("error") === "access_denied";
     const state = url.searchParams.get("state");
     if (callbacks.has(state) && (allowed || denied)) {
       callbacks.set(state, {
         host: req.headers.host, decision: allowed ? "allow" : "deny", code: url.searchParams.get("code"),
-        private: !req.headers.referer && !req.headers.cookie,
       });
     }
   }
@@ -100,31 +102,7 @@ try {
     "--remote-debugging-pipe", "--user-data-dir=" + join(profile, "chromium")],
   { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
   stopChrome = watchBrowser(chrome);
-  const commands = new Map();
-  let sequence = 0, pending = "";
-  chrome.stdio[4].setEncoding("utf8");
-  chrome.stdio[4].on("data", chunk => {
-    const messages = (pending + chunk).split("\0");
-    pending = messages.pop();
-    for (const message of messages) {
-      const result = JSON.parse(message);
-      if (result.id) commands.get(result.id)?.(result);
-    }
-  });
-  function cdp(method, params, sessionId) {
-    const id = ++sequence;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Browser timed out: " + method)), 5000);
-      commands.set(id, result => {
-        commands.delete(id); clearTimeout(timer);
-        if (result.error) reject(new Error("Browser rejected " + method)); else resolve(result.result);
-      });
-      chrome.stdio[3].write(JSON.stringify({ id, method, params, sessionId }) + "\0");
-    });
-  }
-  const { targetId } = await cdp("Target.createTarget", { url: "about:blank" });
-  const { sessionId } = await cdp("Target.attachToTarget", { targetId, flatten: true });
-  const tab = (method, params) => cdp(method, params, sessionId);
+  const tab = await openBrowserTab(chrome);
   await tab("Emulation.setDeviceMetricsOverride", { width: 940, height: 850, deviceScaleFactor: 1, mobile: false });
   async function evaluate(expression) {
     return (await tab("Runtime.evaluate", { expression, returnByValue: true })).result?.value;
@@ -173,7 +151,7 @@ try {
     const result = callbacks.get(flow.state);
     assert.equal(result.host, new URL(flow.redirectUri).host);
     assert.equal(result.decision, decision);
-    assert.equal(result.private, true, "Client callback received referrer or cookies");
+    assert.equal(callbackPrivacyViolation, false, "Client callback received referrer or cookies");
     callbacks.delete(flow.state);
     return result.code;
   }
@@ -185,7 +163,6 @@ try {
   await rendered("Fixture identity provider");
   await click('button[formaction="/rejected"]');
   await rendered("Sign-in not allowed.");
-  await capture("02-sign-in-error");
   assert.equal(await db.prepare("SELECT count(*) AS total FROM accounts").first("total"), 0);
 
   const onboard = authorization(client_id, redirect);
@@ -219,7 +196,10 @@ try {
   body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capy_projects_list", arguments: {} } }) });
   const read = await call();
   assert.equal(read.status, 200);
-  assert.equal((await read.json()).result?.isError, undefined);
+  const rpc = await read.json();
+  assert.ok(!Object.hasOwn(rpc, "error"), "MCP returned a JSON-RPC error");
+  assert.ok(!rpc.result?.isError, "MCP returned a tool error");
+  assert.deepEqual(rpc.result?.structuredContent, { projects: [] });
   assert.equal(capyCalls, 2);
 
   await navigate(origin + "/account");
@@ -252,7 +232,16 @@ try {
   await click('form[action="/account/disconnect"] button');
   await rendered("No authorized MCP clients");
   assert.equal(await db.prepare("SELECT authorization_epoch FROM accounts").first("authorization_epoch"), 1);
-  console.log("PASS: signed cross-site OIDC admission and denial, Capy onboarding, consent and OAuth PKCE exchange, authenticated MCP call, closed revocation, guarded disconnect, and private IPv4/IPv6 loopback callbacks.");
+  await navigate(origin + "/auth/login");
+  await rendered("Fixture identity provider");
+  await click('button[formaction="/withdrawn"]');
+  await rendered("Sign-in not allowed.");
+  await navigate(origin + "/account");
+  await rendered("Access denied");
+  await capture("02-sign-in-error");
+  await click('form[action="/auth/logout"] button');
+  await rendered("Sign in to Capy MCP");
+  assert.equal(await db.prepare("SELECT count(*) AS n FROM browser_sessions").first("n"), 0);
 } finally {
   try {
     await stopChrome?.();
@@ -265,3 +254,6 @@ try {
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
+assert.equal(callbackPrivacyViolation, false, "Client callback received referrer or cookies");
+assert.equal(callbackArrivals, 5, "Unexpected number of callback arrivals");
+console.log("PASS: signed cross-site OIDC admission and denial, Capy onboarding, consent and OAuth PKCE exchange, authenticated MCP call, closed revocation, guarded disconnect, and private IPv4/IPv6 loopback callbacks.");

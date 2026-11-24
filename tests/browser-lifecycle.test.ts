@@ -2,7 +2,48 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { expect, it } from "vitest";
-import { watchBrowser } from "./hosted/fixtures/browser-lifecycle.js";
+import { openBrowserTab, watchBrowser } from "./hosted/fixtures/browser-lifecycle.js";
+
+it("allows a cold target beyond five seconds and still times out an unanswered established command", async () => {
+  const script = `
+    const { Socket } = require("node:net");
+    const input = new Socket({ fd: 3, readable: true, writable: false });
+    const output = new Socket({ fd: 4, writable: true, readable: false });
+    let pending = "";
+    input.on("data", chunk => {
+      const frames = (pending + chunk).split("\\0");
+      pending = frames.pop();
+      for (const frame of frames) {
+        const { id, method } = JSON.parse(frame);
+        if (method.startsWith("Target.")) setTimeout(() =>
+          output.write(JSON.stringify({ id, result: { targetId: "target", sessionId: "session" } }) + "\\0"),
+          method === "Target.createTarget" ? 5300 : 0);
+      }
+    });
+  `;
+  const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+  const stop = watchBrowser(child);
+  try {
+    const tab = await openBrowserTab(child);
+    await expect(tab("Page.enable")).rejects.toThrow("Browser timed out: Page.enable");
+  } finally {
+    await stop();
+  }
+}, 15_000);
+
+it.each([
+  ["exit", "process.exit(7)", /^Browser exited: 7$/],
+  ["output pipe EOF", "require('node:fs').closeSync(4); setInterval(() => {}, 1000)", /^Browser debugging pipe (?:closed|failed)$/],
+  ["malformed frame", "require('node:fs').writeSync(4, 'private-fixture-text' + String.fromCharCode(0)); setInterval(() => {}, 1000)", /^Invalid browser debugging response$/],
+])("reports %s during startup promptly without raw child or frame text", async (_, script, message) => {
+  const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+  const stop = watchBrowser(child);
+  try {
+    await expect(openBrowserTab(child)).rejects.toThrow(message);
+  } finally {
+    await stop();
+  }
+}, 3_000);
 
 it("returns when a child has already exited by signal", async () => {
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });

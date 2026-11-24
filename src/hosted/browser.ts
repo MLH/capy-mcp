@@ -177,6 +177,14 @@ export async function csrfToken(request: Request, session: BrowserSession): Prom
   return await validCsrf(cookie, session) ? cookie : null;
 }
 
+export async function signOutFormToken(request: Request, env: Env): Promise<string | null> {
+  if (request.method !== "GET" || !browserUrl(request, env.PUBLIC_ORIGIN)) return null;
+  const id = readCookie(request, sessionCookie);
+  if (!id) return null;
+  const session = await createStore(env.DB).getSession(id);
+  return session && csrfToken(request, session);
+}
+
 function rejectMutationRequest(request: Request, origin: string): Response | null {
   if (request.method !== "POST") return problem(405, "Method not allowed.");
   if (!browserUrl(request, origin) || request.headers.get("Origin") !== origin) return problem(403, "Request not allowed.");

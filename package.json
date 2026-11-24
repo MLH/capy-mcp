@@ -35,19 +35,17 @@
     "generate:check": "tsx scripts/generate.ts --check",
     "api:refresh": "tsx scripts/refresh-api.ts"
   },
-  "dependencies": {
-    "@cloudflare/workers-oauth-provider": "1.3.0",
-    "@modelcontextprotocol/core": "2.4.0",
-    "@modelcontextprotocol/server": "2.4.0",
-    "openid-client": "6.9.1"
-  },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.8.3",
+    "@cloudflare/workers-oauth-provider": "1.3.0",
     "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/core": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0",
     "@types/node": "24.10.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "esbuild": "0.28.2",
+    "openid-client": "6.9.1",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vitest": "4.1.12",

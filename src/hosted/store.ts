@@ -130,13 +130,13 @@ export function createStore(db: D1Database) {
       return upsert.meta.changes === 1;
     },
 
-    async deleteCredential(accountId: string): Promise<boolean> {
+    async deleteCredential(accountId: string, expectedVersion: number): Promise<boolean> {
       const [, deleted] = await db.batch([
         db.prepare(`
           UPDATE accounts SET credential_version = credential_version + 1
-          WHERE id = ? AND EXISTS (SELECT 1 FROM credentials WHERE account_id = accounts.id)
-        `).bind(accountId),
-        db.prepare("DELETE FROM credentials WHERE account_id = ?").bind(accountId),
+          WHERE id = ? AND credential_version = ? AND EXISTS (SELECT 1 FROM credentials WHERE account_id = accounts.id AND version = ?)
+        `).bind(accountId, expectedVersion, expectedVersion),
+        db.prepare("DELETE FROM credentials WHERE account_id = ? AND version = ?").bind(accountId, expectedVersion),
       ]);
       return deleted.meta.changes === 1;
     },
@@ -156,10 +156,10 @@ export function createStore(db: D1Database) {
       return result.meta.changes === 1;
     },
 
-    async getAccountConnection(accountId: string): Promise<{ connected: boolean; clients: AccountClient[] }> {
-      type ConnectionRow = { connected: number; id: string | null; label: string | null; scopes: string | null; createdAt: number | null };
+    async getAccountConnection(accountId: string): Promise<{ connected: boolean; generation: number; clients: AccountClient[] }> {
+      type ConnectionRow = { generation: number; connected: number; id: string | null; label: string | null; scopes: string | null; createdAt: number | null };
       const { results } = await primary(`
-        SELECT credentials.account_id IS NOT NULL AS connected, app_grants.id, COALESCE(app_grants.client_label, app_grants.client_id) AS label,
+        SELECT accounts.credential_version AS generation, credentials.account_id IS NOT NULL AS connected, app_grants.id, COALESCE(app_grants.client_label, app_grants.client_id) AS label,
           app_grants.scopes, app_grants.created_at AS createdAt
         FROM accounts
         LEFT JOIN credentials ON credentials.account_id = accounts.id AND credentials.version = accounts.credential_version
@@ -172,7 +172,8 @@ export function createStore(db: D1Database) {
       for (const { id, label, scopes, createdAt } of results) {
         if (id !== null && label !== null && scopes !== null) clients.push({ id, label, scopes: JSON.parse(scopes), createdAt });
       }
-      return { connected: results[0]?.connected === 1, clients };
+      if (!results.length) throw new Error("Account no longer exists");
+      return { generation: results[0].generation, connected: results[0].connected === 1, clients };
     },
 
     async attachProviderGrant(accountId: string, appGrantId: string, providerId: string, clientId: string): Promise<boolean> {
@@ -228,18 +229,23 @@ export function createStore(db: D1Database) {
     },
 
     async cleanupRevoked(accountId: string, revoke: (id: string, user: string) => Promise<void>) {
-      for (;;) {
-        const { results } = await primary(`SELECT g.id, provider_grant_id AS provider FROM app_grants g JOIN accounts a ON a.id=g.account_id
-          WHERE a.id=? AND instr(provider_grant_id, ':')=0 AND
-            (g.revoked_at IS NOT NULL OR g.authorization_epoch != a.authorization_epoch OR g.credential_version != a.credential_version)
-          LIMIT 8`).bind(accountId).all<{ id: string; provider: string }>();
-        if (!results.length) return;
-        const done = await Promise.allSettled(results.map(async ({ id, provider }) => {
+      const { results } = await primary(`WITH owned AS NOT MATERIALIZED (
+        SELECT g.id, g.provider_grant_id AS provider, g.revoked_at, g.authorization_epoch AS epoch, g.credential_version AS version,
+          a.authorization_epoch AS current_epoch, a.credential_version AS current_version
+        FROM accounts a JOIN app_grants g ON g.account_id=a.id WHERE a.id=? AND instr(g.provider_grant_id, ':')=0
+      )
+      SELECT id, provider FROM owned WHERE revoked_at IS NOT NULL
+      UNION ALL SELECT id, provider FROM owned WHERE revoked_at IS NULL AND version < current_version
+      UNION ALL SELECT id, provider FROM owned WHERE revoked_at IS NULL AND version = current_version AND epoch < current_epoch
+      LIMIT 8`).bind(accountId).all<{ id: string; provider: string }>();
+      for (const { id, provider } of results) {
+        try {
           await revoke(provider, accountId);
           await db.prepare("UPDATE app_grants SET provider_grant_id=? WHERE account_id=? AND id=? AND provider_grant_id=?")
             .bind("revoked:" + id, accountId, id, provider).run();
-        }));
-        if (done.some(r => r.status === "rejected")) return;
+        } catch {
+          continue;
+        }
       }
     },
 
@@ -251,9 +257,12 @@ export function createStore(db: D1Database) {
     },
 
     async createSession(id: string, session: BrowserSession): Promise<void> {
-      await db.prepare(`
-        INSERT INTO browser_sessions (session_hash, account_id, csrf_hash, expires_at) VALUES (?, ?, ?, ?)
-      `).bind(await hashOpaqueId(id), session.accountId, session.csrfHash, session.expiresAt).run();
+      await db.batch([
+        db.prepare(`DELETE FROM browser_sessions WHERE rowid IN
+          (SELECT rowid FROM browser_sessions WHERE expires_at <= (${databaseTimeMs}) LIMIT 32)`),
+        db.prepare(`INSERT INTO browser_sessions (session_hash, account_id, csrf_hash, expires_at) VALUES (?, ?, ?, ?)
+      `).bind(await hashOpaqueId(id), session.accountId, session.csrfHash, session.expiresAt),
+      ]);
     },
 
     async getSession(id: string): Promise<BrowserSession | null> {
@@ -268,10 +277,13 @@ export function createStore(db: D1Database) {
     },
 
     async createLogin({ stateHash, browserHash, verifier, nonce, continuation, expiresAt }: LoginTransaction): Promise<void> {
-      await db.prepare(`
-        INSERT INTO login_transactions (state_hash, browser_hash, verifier, nonce, continuation, expires_at)
+      await db.batch([
+        db.prepare(`DELETE FROM login_transactions WHERE rowid IN
+          (SELECT rowid FROM login_transactions WHERE expires_at <= (${databaseTimeMs}) LIMIT 32)`),
+        db.prepare(`INSERT INTO login_transactions (state_hash, browser_hash, verifier, nonce, continuation, expires_at)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).bind(stateHash, browserHash, verifier, nonce, continuation, expiresAt).run();
+      `).bind(stateHash, browserHash, verifier, nonce, continuation, expiresAt),
+      ]);
     },
 
     async consumeLogin(stateHash: string, browserHash: string): Promise<LoginTransaction | null> {

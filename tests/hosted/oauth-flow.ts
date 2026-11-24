@@ -1,4 +1,4 @@
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { expect, vi } from "vitest";
 import worker from "../../src/worker.js";
 import { browserOrigin, fakeIssuer } from "./fake-issuer.js";
@@ -6,7 +6,12 @@ import { browserOrigin, fakeIssuer } from "./fake-issuer.js";
 export const resource = browserOrigin + "/mcp";
 export const redirect = "https://client.example.invalid/callback";
 const verifier = "fixture-verifier-".repeat(4);
-export const serveHosted = (request: Request, env: Env) => worker.fetch(request, env, createExecutionContext());
+export async function serveHosted(request: Request, env: Env) {
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(request, env, ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
+}
 
 export function completionTarget(response: Response): URL {
   const url = /^0; url="([^"]+)"$/.exec(response.headers.get("Refresh") ?? "")?.[1];

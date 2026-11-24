@@ -1,9 +1,10 @@
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import type { OAuthResourceContext } from "@cloudflare/workers-oauth-provider";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { clientFlow, resource, serveHosted } from "./oauth-flow.js";
 import { signingKey } from "./fake-issuer.js";
 import { resetHostedDb } from "./setup.js";
+import worker from "../../src/worker.js";
 import { handleMcp } from "../../src/hosted/mcp.js";
 import { createStore } from "../../src/hosted/store.js";
 
@@ -11,6 +12,77 @@ let keys: CryptoKeyPair;
 beforeAll(async () => { keys = await signingKey(); });
 beforeEach(resetHostedDb);
 afterEach(() => vi.unstubAllGlobals());
+
+it.each(["many pages", "slow sibling"])("tracks and bounds provider KV operations for a single large grant (%s)", async kind => {
+  const flow = await clientFlow(keys);
+  await flow.connect("fixture-key");
+  const request = () => new Request(flow.env.PUBLIC_ORIGIN + "/account/disconnect", {
+    method: "POST", body: flow.form({}), headers: { Origin: flow.env.PUBLIC_ORIGIN,
+      Cookie: [...flow.cookies].map(([k,v]) => k + "=" + v).join("; ") },
+  });
+  let release!: () => void, operations = 0;
+  const outstanding = new Promise<void>(done => { release = done; });
+  const remaining = new Set(Array.from({ length: 64 }, (_, i) => "fixture-" + i));
+  const env = { ...flow.env, OAUTH_KV: new Proxy(flow.env.OAUTH_KV, { get(target, key) {
+    if (key === "list") return async ({ limit = 1000 }) => {
+      operations++;
+      const keys = [...remaining].slice(0, limit).map(name => ({ name }));
+      return { keys, list_complete: keys.length === remaining.size, cursor: "more" };
+    };
+    if (key === "delete") return async (id: string) => {
+      operations++;
+      if (kind === "slow sibling" && id === "fixture-0") throw new Error("Fixture unavailable");
+      if (kind === "slow sibling" && id === "fixture-1") await outstanding;
+      remaining.delete(id);
+    };
+    return Reflect.get(target, key);
+  } }) };
+  const ctx = createExecutionContext();
+  expect((await worker.fetch(request(), env, ctx)).status).toBe(303);
+  const settled = waitOnExecutionContext(ctx);
+  if (kind === "slow sibling") {
+    try {
+      expect(await Promise.race([settled.then(() => true), new Promise<boolean>(done => setTimeout(() => done(false), 100))])).toBe(false);
+    } finally { release(); await settled; }
+    return;
+  }
+  await settled;
+  expect(operations).toBeGreaterThan(1);
+  expect(operations).toBeLessThanOrEqual(48);
+  expect(remaining.size).toBeGreaterThan(0);
+  const retry = createExecutionContext();
+  expect((await worker.fetch(request(), env, retry)).status).toBe(303);
+  await waitOnExecutionContext(retry);
+  expect(remaining.size).toBe(0);
+});
+
+it("acknowledges a committed disconnect before slow provider cleanup, even if cleanup later fails", async () => {
+  const flow = await clientFlow(keys);
+  const tokens = await flow.connect("fixture-key");
+  let release!: () => void;
+  const slow = new Promise<void>(done => { release = done; });
+  const kv = flow.env.OAUTH_KV;
+  const env = { ...flow.env, OAUTH_KV: new Proxy(kv, { get(target, key) {
+    if (key === "list") return async () => { await slow; throw new Error("Fixture unavailable"); };
+    const value = Reflect.get(target, key);
+    return typeof value === "function" ? value.bind(target) : value;
+  } }) };
+  const ctx = createExecutionContext();
+  const request = new Request(env.PUBLIC_ORIGIN + "/account/disconnect", {
+    method: "POST", body: flow.form({}), headers: { Origin: env.PUBLIC_ORIGIN,
+      Cookie: [...flow.cookies].map(([k,v]) => k + "=" + v).join("; ") },
+  });
+  const response = worker.fetch(request, env, ctx);
+  try {
+    const result = await Promise.race([response, new Promise<null>(done => setTimeout(() => done(null), 750))]);
+    expect(result?.status).toBe(303);
+    expect((await rpc(flow.env, tokens.access_token)).status).toBe(401);
+  } finally {
+    release();
+    await response;
+    await waitOnExecutionContext(ctx);
+  }
+});
 
 it("reflects verified refresh-token revocation in D1 before acknowledgement, without widening access-token revocation", async () => {
   const flow = await clientFlow(keys);
@@ -108,7 +180,7 @@ it.each(["/account/key", "/account/key/delete", "/account/disconnect", "admissio
     return Promise.all(keys.map(async ({ name }) => [name, (await kv.get(name))!] as const));
   }))).flat();
   if (path === "admission") flow.env.OIDC_ALLOWED_CLAIM_VALUES = '["other"]';
-  else expect((await flow.visit(path, flow.form({ key: "fixture-next-key" }))).status).toBe(303);
+  else expect((await flow.visit(path, flow.form({ key: "fixture-next-key", generation: "1" }))).status).toBe(303);
   for (const [key, value] of entries) await kv.put(key, value);
   const stale = await rpc(flow.env, tokens.access_token);
   expect(stale.status).toBe(401);
