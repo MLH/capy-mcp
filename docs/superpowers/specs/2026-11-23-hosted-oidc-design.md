@@ -1,6 +1,6 @@
 # Hosted OIDC and per-user Capy credentials
 
-Status: agreed direction; implementation design awaiting approval. This extends the original single-principal design. Erin approved generic OIDC sign-in, initially Google Workspace for MLH, encrypted per-user Capy keys, and MCP OAuth for remote clients. Existing STDIO is proven useful and must remain independent of hosted authentication.
+Status: approved by Erin on 2026-11-23. This extends the original single-principal design. Erin approved generic OIDC sign-in, initially Google Workspace for MLH, encrypted per-user Capy keys, and MCP OAuth for remote clients. Existing STDIO is proven useful and must remain independent of hosted authentication.
 
 ## Intent
 
