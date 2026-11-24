@@ -1,25 +1,38 @@
 import { exports } from "cloudflare:workers";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { selectOperations } from "../src/catalog.js";
-import worker from "../src/worker.js";
+import { clientFlow, serveHosted } from "./hosted/oauth-flow.js";
+import { browserOrigin, signingKey } from "./hosted/fake-issuer.js";
+import { resetHostedDb } from "./hosted/setup.js";
 import wranglerSource from "../wrangler.jsonc?raw";
 
-const credentials = { CAPY_API_KEY: "test-upstream-key", MCP_AUTH_TOKEN: "test-mcp-token" };
+let credentials: Env;
+const tokens: Record<string, string> = {};
+beforeAll(async () => {
+  await resetHostedDb();
+  const keys = await signingKey();
+  for (const [subject, key] of [["default", "test-upstream-key"], ["one", "key-one"], ["two", "key-two"], ["other", "other-key"]]) {
+    const flow = await clientFlow(keys, subject);
+    tokens[subject] = (await flow.connect(key, true)).access_token;
+    credentials = flow.env;
+  }
+  vi.unstubAllGlobals();
+});
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "worker-test", version: "1" } } };
 const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
 const call = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "capy_issues_list", arguments: { query: { limit: 1 } } } };
 
 function request(body: unknown = list, headers: Record<string, string> = {}, method = "POST", path = "/mcp") {
-  return new Request(`https://private.example${path}`, {
+  return new Request(`${browserOrigin}${path}`, {
     method,
-    headers: { authorization: "Bearer test-mcp-token", accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25", ...headers },
+    headers: { authorization: "Bearer " + tokens.default, accept: "application/json, text/event-stream", "content-type": "application/json", "mcp-protocol-version": "2025-11-25", ...headers },
     ...(method === "POST" ? { body: JSON.stringify(body) } : {}),
   });
 }
 
 function serve(req = request(), env: Partial<Env> = credentials) {
-  return worker.fetch(req, env as Env);
+  return serveHosted(req, env as Env);
 }
 
 describe("private Worker in workerd", () => {
@@ -30,7 +43,7 @@ describe("private Worker in workerd", () => {
     const config = JSON.parse(wranglerSource);
     expect(config.workers_dev).toBe(true);
     expect(config.preview_urls).toBe(false);
-    expect(config.secrets.required).toEqual(["CAPY_API_KEY", "MCP_AUTH_TOKEN", "OIDC_CLIENT_SECRET", "CREDENTIAL_ENCRYPTION_KEY"]);
+    expect(config.secrets.required).toEqual(["OIDC_CLIENT_SECRET", "CREDENTIAL_ENCRYPTION_KEY"]);
     expect(config.vars.MCP_ALLOWED_ORIGINS).toBe("");
   });
 
@@ -57,8 +70,8 @@ describe("private Worker in workerd", () => {
   it("supports the official MCP HTTP client negotiation and finite tool calls", async () => {
     vi.mocked(fetch).mockResolvedValue(Response.json({ issues: [] }));
     const client = new Client({ name: "official-worker-client", version: "1" });
-    const transport = new StreamableHTTPClientTransport(new URL("https://private.example/mcp"), {
-      requestInit: { headers: { authorization: "Bearer test-mcp-token" } },
+    const transport = new StreamableHTTPClientTransport(new URL(browserOrigin + "/mcp"), {
+      requestInit: { headers: { authorization: "Bearer " + tokens.default } },
       fetch: async (input, init) => serve(new Request(input, init)),
     });
     try {
@@ -83,18 +96,15 @@ describe("private Worker in workerd", () => {
     const response = await serve(request(call, { authorization }));
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toContain("Bearer");
-    expect(await response.text()).not.toContain(credentials.CAPY_API_KEY);
+    expect(await response.text()).not.toContain("test-upstream-key");
     expect(fetch).not.toHaveBeenCalled();
   });
 
   it.each([
-    {}, { CAPY_API_KEY: "key" }, { MCP_AUTH_TOKEN: "token" },
-    { ...credentials, MCP_AUTH_TOKEN: "" }, { ...credentials, CAPY_API_KEY: " " },
-    { ...credentials, CAPY_API_KEY: "bad\nkey" },
-    { ...credentials, MCP_AUTH_TOKEN: "bad token" },
-    { CAPY_API_KEY: "test-mcp-token", MCP_AUTH_TOKEN: "test-mcp-token" },
-  ])("fails closed for missing, invalid, or equal credentials %j", async (env) => {
-    const response = await serve(request(call), env);
+    "DB", "OAUTH_KV", "AUTH_RATE_LIMITER", "ACCOUNT_RATE_LIMITER", "OIDC_CLIENT_SECRET", "OIDC_CLIENT_ID",
+    "CREDENTIAL_ENCRYPTION_KEY", "CREDENTIAL_ENCRYPTION_KEY_ID",
+  ])("fails closed without required binding %s", async (binding) => {
+    const response = await serve(request(call), { ...credentials, [binding]: undefined });
     expect(response.status).toBe(503);
     expect(await response.text()).toBe("Invalid server configuration");
     expect(fetch).not.toHaveBeenCalled();
@@ -113,6 +123,12 @@ describe("private Worker in workerd", () => {
     expect(response.status).toBe(401);
     expect(pulls).toBe(0);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("challenges unauthenticated stateless OPTIONS just like GET", async () => {
+    const response = await serve(request(undefined, { authorization: "" }, "OPTIONS"));
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toContain("resource_metadata=");
   });
 
   it.each(["https://browser.example", "null", ""])("denies browser Origin %s by default", async (origin) => {
@@ -205,33 +221,34 @@ describe("private Worker in workerd", () => {
   it("never exposes upstream exceptions, credentials, or failure bodies", async () => {
     const log = vi.spyOn(console, "log");
     const errorLog = vi.spyOn(console, "error");
-    vi.mocked(fetch).mockRejectedValueOnce(new Error("test-upstream-key test-mcp-token private payload"));
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("test-upstream-key " + tokens.default + " private payload"));
     const exception = await serve(request(call));
     expect(await exception.json()).toMatchObject({ result: { isError: true, structuredContent: { error: { code: "network_error" } } } });
-    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ message: "test-upstream-key test-mcp-token private payload", _tag: "capy/Forbidden" }, { status: 403 }));
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ message: "test-upstream-key " + tokens.default + " private payload", _tag: "capy/Forbidden" }, { status: 403 }));
     const response = await serve(request(call));
     const text = await response.text();
     expect(JSON.parse(text)).toMatchObject({ result: { isError: true, structuredContent: { error: { code: "http_error", status: 403, tag: "capy/Forbidden" } } } });
     expect(text).not.toMatch(/test-upstream-key|test-mcp-token|private payload/);
+    expect(text).not.toContain(tokens.default);
     expect(log).not.toHaveBeenCalled();
     expect(errorLog).not.toHaveBeenCalled();
   });
 
-  it("isolates concurrent requests with different environment keys, groups, and tokens", async () => {
+  it("isolates concurrent requests with different account keys, groups, and tokens", async () => {
     const requests: string[] = [];
     vi.mocked(fetch).mockImplementation(async (_url, init) => {
       const key = new Headers(init?.headers).get("authorization")!;
       requests.push(key);
       await new Promise((resolve) => setTimeout(resolve, 5));
-      return Response.json({ principal: key });
+      return Response.json({ principal: key === "Bearer key-one" ? "one" : "two" });
     });
-    const responses = await Promise.all(["one", "two"].map((suffix) => serve(request(call, { authorization: `Bearer token-${suffix}` }), { CAPY_API_KEY: `key-${suffix}`, MCP_AUTH_TOKEN: `token-${suffix}`, CAPY_TOOL_GROUPS: "issues" })));
+    const responses = await Promise.all(["one", "two"].map(suffix => serve(request(call, { authorization: "Bearer " + tokens[suffix] }), { ...credentials, CAPY_TOOL_GROUPS: "issues" })));
     expect(await Promise.all(responses.map((response) => response.json()))).toMatchObject([
-      { result: { structuredContent: { principal: "Bearer key-one" } } },
-      { result: { structuredContent: { principal: "Bearer key-two" } } },
+      { result: { structuredContent: { principal: "one" } } },
+      { result: { structuredContent: { principal: "two" } } },
     ]);
     expect(requests.sort()).toEqual(["Bearer key-one", "Bearer key-two"]);
-    expect((await serve(request(call, { authorization: "Bearer token-one" }), { CAPY_API_KEY: "key-two", MCP_AUTH_TOKEN: "token-two" })).status).toBe(401);
+    expect((await serve(request(call, { authorization: "Bearer key-two" }))).status).toBe(401);
     const lists = await Promise.all(["captains", "issues"].map(async (group) => {
       const response = await serve(request(list), { ...credentials, CAPY_TOOL_GROUPS: group });
       return await response.json();
@@ -267,7 +284,7 @@ describe("private Worker in workerd", () => {
       }, { highWaterMark: 0 }));
     });
     const pending = serve(new Request(request(call), { signal: controller.signal }));
-    const other = serve(request(call), { ...credentials, CAPY_API_KEY: "other-key" });
+    const other = serve(request(call, { authorization: "Bearer " + tokens.other }));
     await Promise.all([ready, otherReady]);
     controller.abort(new Error("private abort reason"));
     await expect.poll(() => abortedSignal?.aborted, { timeout: 500 }).toBe(true);

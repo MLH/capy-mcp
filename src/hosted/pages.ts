@@ -1,5 +1,6 @@
 import { browserResponse } from "./browser.js";
 import { MAX_CREDENTIAL_BYTES } from "./crypto.js";
+import type { ConsentDescription } from "@cloudflare/workers-oauth-provider";
 
 export const ACCOUNT_LOGIN_PATH = "/auth/login";
 export const ACCOUNT_LOGOUT_PATH = "/auth/logout";
@@ -21,6 +22,26 @@ function page(title: string, content: string, status = 200): Response {
 export function signInPage(): Response {
   return page("Sign in to Capy MCP", `<p>Sign in with your configured identity provider to manage your Capy connection.</p>
 <p><a href="${ACCOUNT_LOGIN_PATH}">Sign in</a></p>`, 401);
+}
+
+export function connectForConsent(csrf: string, id: string): Response {
+  return page("Connect your Capy key", `<p>Your client will use the full upstream authority of this key, which may belong to another Capy user.
+  After connecting, review the client's request before granting access.</p>
+  ${postForm("/account/key?transaction=" + encodeURIComponent(id), csrf, "Connect and continue",
+    `<label>Capy API key <input type="password" name="key" required maxlength="${MAX_CREDENTIAL_BYTES}" autocomplete="off" spellcheck="false"></label>`)}`);
+}
+
+export function consentPage(client: ConsentDescription, subject: string, handle: string, csrf: string): Response {
+  return page("Authorize MCP client", `<p>Signed in as <bdi>${escapeHtml(subject)}</bdi>.</p>
+  <p>Client: <bdi>${escapeHtml(client.clientName)}</bdi> (${client.clientDomain ? "verified domain: " + escapeHtml(client.clientDomain) : "unverified name"}).</p>
+  <p>Redirect destination: <bdi>${escapeHtml(client.redirectHost)}</bdi> · <code>${escapeHtml(client.redirectUri)}</code>.</p>
+  ${client.redirectIsLoopback ? "<p>This is a local app. Any local process could be listening.</p>" : ""}
+  <p>Requested permissions: ${client.scope.map(s => `<code>${escapeHtml(s)}</code>`).join(", ")}. Read access lets this client read Capy data.</p>
+  ${client.scope.includes("offline_access") ? "<p>Offline access lets the client refresh its access after you leave.</p>" : ""}
+  <form method="post" action="/consent"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
+  <input type="hidden" name="handle" value="${escapeHtml(handle)}">
+  ${client.scope.includes("capy:write") ? '<label><input type="checkbox" name="write" value="yes"> Allow write operations, including billable work and organization changes</label>' : ""}
+  <button name="decision" value="allow">Allow</button> <button name="decision" value="deny">Deny</button></form>`);
 }
 
 export function accessDeniedPage(): Response {

@@ -1,13 +1,15 @@
 import { ProtocolError, ProtocolErrorCode, Server } from "@modelcontextprotocol/server";
-import { selectOperations } from "./catalog.js";
+import { selectOperations, type Operation } from "./catalog.js";
 import { callCapy, CapyError, type ToolArguments } from "./client.js";
 import { validators } from "./generated/validators.js";
 
 export function createCapyServer(
   config: { apiKey: string; groups?: string },
-  options?: { fetch?: typeof fetch; signal?: AbortSignal },
+  options?: { fetch?: typeof fetch; signal?: AbortSignal; allowOperation?: (operation: Operation) => boolean; reconnectUrl?: string },
 ): Server {
-  const operations = new Map(selectOperations(config.groups).map((operation) => [operation.name, operation]));
+  const operations = new Map(selectOperations(config.groups)
+    .filter(operation => !options?.allowOperation || options.allowOperation(operation))
+    .map(operation => [operation.name, operation]));
   const server = new Server({ name: "capy-mcp", version: "0.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler("tools/list", () => ({
     tools: [...operations.values()].map(({ name, description, inputSchema, annotations }) => ({
@@ -34,7 +36,10 @@ export function createCapyServer(
       if (error instanceof CapyError && error.code === "unsafe_path") {
         throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Invalid tool path");
       }
-      const structuredContent = { error: (error instanceof CapyError ? error : new CapyError("network_error")).toJSON() };
+      const structuredContent = { error: {
+        ...(error instanceof CapyError ? error : new CapyError("network_error")).toJSON(),
+        ...(error instanceof CapyError && error.status === 401 && options?.reconnectUrl ? { reconnect: options.reconnectUrl } : {}),
+      } };
       return { isError: true, structuredContent, content: [{ type: "text", text: JSON.stringify(structuredContent) }] };
     }
   });

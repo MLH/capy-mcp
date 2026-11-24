@@ -6,8 +6,8 @@ import { createCapyServer } from "../src/server.js";
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { await Promise.all(cleanups.splice(0).map((close) => close())); });
 
-async function connect(fetch: typeof globalThis.fetch = async () => Response.json({}), groups?: string) {
-  const server = createCapyServer({ apiKey: "server-secret-key", groups }, { fetch });
+async function connect(fetch: typeof globalThis.fetch = async () => Response.json({}), groups?: string, allowOperation?: (operation: ReturnType<typeof selectOperations>[number]) => boolean) {
+  const server = createCapyServer({ apiKey: "server-secret-key", groups }, { fetch, allowOperation });
   const client = new Client({ name: "test-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   cleanups.push(async () => { await client.close(); await server.close(); });
@@ -17,6 +17,14 @@ async function connect(fetch: typeof globalThis.fetch = async () => Response.jso
 }
 
 describe("Capy MCP server", () => {
+  it("filters both discovery and dispatch before argument validation for read-only callers", async () => {
+    let calls = 0;
+    const client = await connect(async () => { calls++; return Response.json({}); }, "issues", op => op.method === "GET");
+    const result = await client.callTool({ name: "capy_issues_create", arguments: {} }).catch(e => e);
+    expect(result.message).toContain("Unknown or disabled tool");
+    expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(selectOperations("issues").filter(op => op.method === "GET").map(op => op.name));
+    expect(calls).toBe(0);
+  });
   it("initializes and advertises all 102 tools with the catalog schemas and annotations", async () => {
     const client = await connect();
     expect(client.getServerCapabilities()?.tools).toBeDefined();

@@ -175,7 +175,15 @@ export function createStore(db: D1Database) {
       return { connected: results[0]?.connected === 1, clients };
     },
 
-    async getAuthorizedCredential(accountId: string, grantId: string, version: number, epoch: number):
+    async attachProviderGrant(accountId: string, appGrantId: string, providerId: string, clientId: string): Promise<boolean> {
+      const result = await db.prepare(`UPDATE app_grants SET provider_grant_id=? WHERE account_id=? AND id=? AND client_id=?
+        AND provider_grant_id IN (?, ?) AND revoked_at IS NULL`)
+        .bind(providerId, accountId, appGrantId, clientId, "pending:" + appGrantId, providerId).run();
+      return result.meta.changes === 1;
+    },
+
+    async getAuthorizedCredential(accountId: string, grantId: string, version: number, epoch: number,
+      token?: { clientId: string; scopes: string[]; providerGrantId?: string }):
       Promise<{ account: Account; credential: CredentialEnvelope } | null> {
       const row = await primary(`
         SELECT ${accountColumns}, credentials.key_id AS keyId, credentials.nonce, credentials.ciphertext, credentials.version
@@ -185,7 +193,10 @@ export function createStore(db: D1Database) {
           AND app_grants.credential_version = credentials.version AND app_grants.authorization_epoch = accounts.authorization_epoch
         WHERE accounts.id = ? AND app_grants.id = ? AND credentials.version = ?
           AND accounts.authorization_epoch = ? AND app_grants.revoked_at IS NULL
-      `).bind(accountId, grantId, version, epoch).first<AccountRow & CredentialEnvelope>();
+          AND (? IS NULL OR app_grants.client_id = ?) AND (? IS NULL OR app_grants.provider_grant_id = ?)
+          AND NOT EXISTS (SELECT value FROM json_each(?) EXCEPT SELECT value FROM json_each(app_grants.scopes))
+      `).bind(accountId, grantId, version, epoch, token?.clientId ?? null, token?.clientId ?? null,
+        token?.providerGrantId ?? null, token?.providerGrantId ?? null, JSON.stringify(token?.scopes ?? [])).first<AccountRow & CredentialEnvelope>();
       if (!row) return null;
       const { keyId, nonce, ciphertext, version: storedVersion } = row;
       return { account: toAccount(row), credential: { keyId, nonce, ciphertext, version: storedVersion } };
@@ -209,6 +220,22 @@ export function createStore(db: D1Database) {
         UPDATE app_grants SET revoked_at = ? WHERE account_id = ? AND id = ? AND revoked_at IS NULL
       `).bind(Date.now(), accountId, grantId).run();
       return result.meta.changes === 1;
+    },
+
+    async cleanupRevoked(accountId: string, revoke: (id: string, user: string) => Promise<void>) {
+      for (;;) {
+        const { results } = await primary(`SELECT g.id, provider_grant_id AS provider FROM app_grants g JOIN accounts a ON a.id=g.account_id
+          WHERE a.id=? AND instr(provider_grant_id, ':')=0 AND
+            (g.revoked_at IS NOT NULL OR g.authorization_epoch != a.authorization_epoch OR g.credential_version != a.credential_version)
+          LIMIT 8`).bind(accountId).all<{ id: string; provider: string }>();
+        if (!results.length) return;
+        const done = await Promise.allSettled(results.map(async ({ id, provider }) => {
+          await revoke(provider, accountId);
+          await db.prepare("UPDATE app_grants SET provider_grant_id=? WHERE account_id=? AND id=? AND provider_grant_id=?")
+            .bind("revoked:" + id, accountId, id, provider).run();
+        }));
+        if (done.some(r => r.status === "rejected")) return;
+      }
     },
 
     async disconnectAll(accountId: string): Promise<boolean> {

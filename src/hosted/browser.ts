@@ -6,6 +6,7 @@ import { hashOpaqueId } from "./crypto.js";
 import { BodyLimitError, boundedBody } from "./http.js";
 import { authorizationStart, OIDC_CALLBACK_PATH, verifiedIdentity } from "./identity.js";
 import { createStore, type Account, type BrowserSession } from "./store.js";
+import { transactions } from "./transactions.js";
 
 export type InternalContinuation = { kind: "account" } | { kind: "authorize"; transactionId: string };
 type SignedIn = { account: Account; session: BrowserSession };
@@ -64,7 +65,7 @@ function parseContinuation(input: unknown): InternalContinuation | null {
   return { kind: "authorize", transactionId: input.transactionId };
 }
 
-async function authAllowed(request: Request, env: Env): Promise<boolean> {
+export async function authAllowed(request: Request, env: Env): Promise<boolean> {
   const ip = request.cf && !request.headers.has("CF-Worker") ? request.headers.get("CF-Connecting-IP") : null;
   const { success } = await env.AUTH_RATE_LIMITER.limit({
     key: ip && ip.length <= 45 && isIP(ip) !== 0 ? `ip:${ip}` : "anonymous",
@@ -135,9 +136,11 @@ export async function finishLogin(request: Request, env: Env): Promise<Response>
     if (prior) await store.deleteSession(prior);
     const session = randomState();
     const csrf = randomState();
+    const csrfHash = await hashOpaqueId(csrf);
     await store.createSession(session, {
-      accountId: account.id, csrfHash: await hashOpaqueId(csrf), expiresAt: Date.now() + sessionLifetime * 1_000,
+      accountId: account.id, csrfHash, expiresAt: Date.now() + sessionLifetime * 1_000,
     });
+    if (resume.kind === "authorize") await transactions(env.DB).bindLogin(resume.transactionId, csrfHash);
     const destination = resume.kind === "authorize" ? `/oauth/resume?transaction=${resume.transactionId}` : "/account";
     return browserRedirect(destination, clearBinding, cookieValue(sessionCookie, session, sessionLifetime),
       cookieValue(csrfCookie, csrf, sessionLifetime));

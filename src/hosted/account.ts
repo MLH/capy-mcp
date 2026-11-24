@@ -49,7 +49,7 @@ async function showAccount(request: Request, env: Env, url: URL): Promise<Respon
   });
 }
 
-export async function handleAccount(request: Request, env: Env): Promise<Response> {
+export async function handleAccount(request: Request, env: Env, revokeProviderGrant?: (id: string, user: string) => Promise<void>): Promise<Response> {
   try {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -91,7 +91,10 @@ export async function handleAccount(request: Request, env: Env): Promise<Respons
       return problem(409, "The account changed. Reload and try again.");
     }
 
-    return browserResponse(null, { status: 303, headers: { Location: "/account" } });
+    if (revokeProviderGrant) await store.cleanupRevoked(account.id, revokeProviderGrant).catch(() => {});
+    const id = url.searchParams.get("transaction");
+    const resume = path === "/account/key" && id && /^[0-9a-f-]{36}$/.test(id) ? "/oauth/resume?transaction=" + id : "/account";
+    return browserResponse(null, { status: 303, headers: { Location: resume } });
   } catch {
     return problem(503, "Account operation unavailable.");
   }

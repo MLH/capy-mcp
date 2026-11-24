@@ -21,7 +21,7 @@ function allowlist(value: string | undefined, valid: (item: unknown) => item is 
   return new Set(entries);
 }
 
-export function parseHostedConfig(env: Env): HostedConfig {
+export function parseHostedIdentityConfig(env: Env): Omit<HostedConfig, "groups" | "allowedOrigins"> {
   try {
     const origin = new URL(env.PUBLIC_ORIGIN);
     const issuer = new URL(env.OIDC_ISSUER);
@@ -47,13 +47,6 @@ export function parseHostedConfig(env: Env): HostedConfig {
       throw new Error("Invalid encryption configuration");
     }
 
-    const groups = env.CAPY_TOOL_GROUPS;
-    selectOperations(groups);
-    const allowedOrigins = env.MCP_ALLOWED_ORIGINS ? env.MCP_ALLOWED_ORIGINS.split(",") : [];
-    for (const value of allowedOrigins) {
-      const url = new URL(value);
-      if (!/^https?:$/.test(url.protocol) || url.origin !== value) throw new Error("Invalid client origin");
-    }
     if (typeof env.DB?.withSession !== "function" || typeof env.OAUTH_KV?.get !== "function" ||
         typeof env.AUTH_RATE_LIMITER?.limit !== "function" || typeof env.ACCOUNT_RATE_LIMITER?.limit !== "function") {
       throw new Error("Missing hosted binding");
@@ -66,9 +59,23 @@ export function parseHostedConfig(env: Env): HostedConfig {
       subjects,
       claim: claimName && claimValues ? { name: claimName, values: claimValues } : undefined,
       encryption: { key, keyId },
-      groups,
-      allowedOrigins,
     };
+  } catch {
+    throw new Error("Invalid hosted configuration");
+  }
+}
+
+export function parseHostedConfig(env: Env): HostedConfig {
+  const identity = parseHostedIdentityConfig(env);
+  try {
+    const groups = env.CAPY_TOOL_GROUPS;
+    selectOperations(groups);
+    const allowedOrigins = env.MCP_ALLOWED_ORIGINS ? env.MCP_ALLOWED_ORIGINS.split(",") : [];
+    for (const value of allowedOrigins) {
+      const url = new URL(value);
+      if (!/^https?:$/.test(url.protocol) || url.origin !== value) throw new Error("Invalid client origin");
+    }
+    return { ...identity, groups, allowedOrigins };
   } catch {
     throw new Error("Invalid hosted configuration");
   }

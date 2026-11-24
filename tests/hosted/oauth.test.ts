@@ -1,0 +1,230 @@
+import { createExecutionContext } from "cloudflare:test";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import worker from "../../src/worker.js";
+import { hostedEnv } from "./fixtures.js";
+import { clientFlow, redirect, resource, serveHosted } from "./oauth-flow.js";
+import { signingKey } from "./fake-issuer.js";
+import { resetHostedDb } from "./setup.js";
+import { createStore } from "../../src/hosted/store.js";
+
+let keys: CryptoKeyPair;
+beforeAll(async () => { keys = await signingKey(); });
+beforeEach(resetHostedDb);
+afterEach(() => vi.unstubAllGlobals());
+
+it("does not issue a refresh token without consent for offline access", async () => {
+  const flow = await clientFlow(keys);
+  await flow.onboard("fixture-key");
+  const authorized = await flow.decide(await flow.authorize({ scope: "" }));
+  const response = await flow.exchange(new URL(authorized.headers.get("Location")!).searchParams.get("code")!);
+  const value = await response.json<Record<string, unknown>>();
+  expect(value.scope).toBe("capy:read");
+  expect(value).not.toHaveProperty("refresh_token");
+});
+
+it("shows the vetted client metadata document's verified domain and untrusted name as text", async () => {
+  const flow = await clientFlow(keys);
+  await flow.onboard("fixture-key");
+  const clientId = "https://desktop.example.invalid/oauth/client.json";
+  const fetchDocument = vi.fn(async () => Response.json({
+    client_id: clientId, client_name: "<img src=x>", redirect_uris: [redirect], token_endpoint_auth_method: "none",
+  }));
+  vi.stubGlobal("fetch", fetchDocument);
+  const page = await flow.authorize({ client_id: clientId });
+  expect(page.status).toBe(200);
+  const html = await page.text();
+  expect(html).toContain("verified domain: desktop.example.invalid");
+  expect(html).toContain("&lt;img src=x&gt;");
+  expect(fetchDocument).toHaveBeenCalledWith(clientId, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+});
+
+it("denies through the provider's stored redirect and rejects consumed or unbound handles", async () => {
+  const flow = await clientFlow(keys);
+  const page = await flow.onboard("fixture-key");
+  const cookie = [...flow.cookies].find(([k]) => k.startsWith("__Host-oauth-consent"))!;
+  flow.cookies.delete(cookie[0]);
+  expect((await flow.decide(page.clone())).status).toBe(400);
+  flow.cookies.set(...cookie);
+  const denied = await flow.decide(page.clone(), "deny");
+  expect(denied.status).toBe(303);
+  expect(denied.headers.getSetCookie().some(v => v.includes("Max-Age=0"))).toBe(true);
+  const destination = new URL(denied.headers.get("Location")!);
+  expect(destination.origin + destination.pathname).toBe(redirect);
+  expect(Object.fromEntries(destination.searchParams)).toMatchObject({ error: "access_denied", state: "client-state" });
+  flow.cookies.set(...cookie);
+  expect((await flow.decide(page)).status).toBe(400);
+});
+
+it("binds the callback and resume to the original browser session", async () => {
+  const a = await clientFlow(keys);
+  const { callback, resume } = await a.signIn();
+  expect((await a.visit(callback)).status).toBe(400);
+  const b = await clientFlow(keys, "member-2");
+  await b.signIn();
+  expect((await b.visit(resume)).status).toBe(400);
+  expect((await a.visit(resume)).status).toBe(200);
+});
+
+it.each(["/account/key", "/account/disconnect"])("will not grant from a consent page opened before %s", async path => {
+  const flow = await clientFlow(keys);
+  const page = await flow.onboard("fixture-key");
+  expect((await flow.visit(path, flow.form({ key: "fixture-replacement" }))).status).toBe(303);
+  const stale = await flow.decide(page);
+  expect(stale.status).toBe(409);
+  expect(stale.headers.has("Location")).toBe(false);
+  expect(await flow.env.DB.prepare("SELECT count(*) FROM app_grants").first("count(*)")).toBe(0);
+});
+
+it("uses the consent form at most once even when both approvals arrive together", async () => {
+  const flow = await clientFlow(keys);
+  const page = await flow.onboard("fixture-key");
+  const [a, b] = await Promise.all([flow.decide(page.clone()), flow.decide(page)]);
+  expect([a, b].filter(r => r.status === 303)).toHaveLength(1);
+  expect(await flow.env.DB.prepare("SELECT count(*) FROM app_grants").first("count(*)")).toBe(1);
+});
+
+it("preserves provider cookie clearing when the authority store fails after approval", async () => {
+  const flow = await clientFlow(keys);
+  const page = await flow.onboard("fixture-key");
+  await flow.env.DB.exec("ALTER TABLE consent_snapshots RENAME TO unavailable_snapshots");
+  try {
+    const failed = await flow.decide(page);
+    expect(failed.status).toBe(503);
+    expect(failed.headers.has("Location")).toBe(false);
+    expect(failed.headers.getSetCookie().some(v => v.startsWith("__Host-oauth-consent") && v.includes("Max-Age=0"))).toBe(true);
+  } finally {
+    await flow.env.DB.exec("ALTER TABLE unavailable_snapshots RENAME TO consent_snapshots");
+  }
+});
+
+it("blocks an unexchanged code after revoking its app grant", async () => {
+  const flow = await clientFlow(keys);
+  const approved = await flow.decide(await flow.onboard("fixture-key"));
+  const id = await flow.env.DB.prepare("SELECT id FROM app_grants").first<string>("id");
+  expect((await flow.visit("/account/grants/" + id + "/revoke", flow.form({}))).status).toBe(303);
+  const code = new URL(approved.headers.get("Location")!).searchParams.get("code")!;
+  const response = await flow.exchange(code);
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: "invalid_grant" });
+});
+
+it("never stores or returns the upstream key in protocol material", async () => {
+  const key = "fixture-capy-sensitive-value";
+  const flow = await clientFlow(keys);
+  const response = await flow.connect(key);
+  expect(JSON.stringify(response)).not.toContain(key);
+  const { keys: entries } = await flow.env.OAUTH_KV.list();
+  for (const entry of entries) {
+    expect(entry.name).not.toContain(key);
+    expect(await flow.env.OAUTH_KV.get(entry.name)).not.toContain(key);
+  }
+  const grant = await flow.env.DB.prepare("SELECT * FROM app_grants").first();
+  expect(JSON.stringify(grant)).not.toContain(key);
+});
+
+it("keeps browser mutations out of public discovery preflight", async () => {
+  const env = hostedEnv();
+  const options = (path: string) => serveHosted(new Request(env.PUBLIC_ORIGIN + path,
+    { method: "OPTIONS", headers: { Origin: "https://desktop.example.invalid" } }), env);
+  const discovery = await options("/.well-known/oauth-authorization-server");
+  expect(discovery.status).toBe(204);
+  expect(discovery.headers.has("Access-Control-Allow-Credentials")).toBe(false);
+  for (const path of ["/consent", "/account/key", "/auth/logout"]) {
+    const response = await options(path);
+    expect(response.status).toBe(405);
+    expect(response.headers.has("Access-Control-Allow-Origin")).toBe(false);
+  }
+});
+
+it("rejects modified consent fields and invalid scopes, PKCE or resource indicators", async () => {
+  const flow = await clientFlow(keys);
+  const invalid: Record<string, string>[] = [{ scope: "capy:admin" }, { code_challenge_method: "plain" },
+    { code_challenge: "" }, { resource: resource + "/" }, { resource: "" }, { redirect_uri: redirect + "/other" }];
+  for (const override of invalid) {
+    expect((await flow.authorize(override)).status).toBe(400);
+  }
+  const page = await flow.onboard("fixture-key");
+  const handle = (await page.clone().text()).match(/name="handle" value="([^"]+)"/)![1];
+  expect((await flow.visit("/consent", flow.form({ handle, decision: "allow", redirect_uri: "https://else.example.invalid/" }))).status).toBe(400);
+  const authorized = await flow.decide(page, "allow", true);
+  const code = new URL(authorized.headers.get("Location")!).searchParams.get("code")!;
+  expect((await flow.exchange(code, { code_verifier: "wrong".repeat(12) })).status).toBe(400);
+  expect((await flow.exchange(code, { resource: resource + "/other" })).status).toBe(400);
+});
+
+it.each(["/token", "/register"])("bounds chunked %s protocol submissions before handing them to the provider", async path => {
+  const env = hostedEnv();
+  const body = new ReadableStream<Uint8Array>({
+    pull(c) { c.enqueue(new Uint8Array(32_769)); c.close(); },
+  });
+  const response = await serveHosted(new Request(env.PUBLIC_ORIGIN + path, { method: "POST", body,
+    headers: { "Content-Type": path === "/token" ? "application/x-www-form-urlencoded" : "application/json" } }), env);
+  expect(response.status).toBe(413);
+});
+
+it.each(["/token", "/register", "/authorize"])("rate limits %s before parsing or calling a client or issuer", async path => {
+  const env = hostedEnv({ AUTH_RATE_LIMITER: { limit: async () => ({ success: false }) } });
+  const response = await serveHosted(new Request(env.PUBLIC_ORIGIN + path, { method: path === "/authorize" ? "GET" : "POST" }), env);
+  expect(response.status).toBe(429);
+});
+
+it("rejects a code exchange missing the explicit MCP resource", async () => {
+  const flow = await clientFlow(keys);
+  const allowed = await flow.decide(await flow.onboard("fixture-key"));
+  const code = new URL(allowed.headers.get("Location")!).searchParams.get("code")!;
+  const response = await flow.token({ grant_type: "authorization_code", code, redirect_uri: redirect,
+    code_verifier: "fixture-verifier-".repeat(4) });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: "invalid_target" });
+});
+
+it("requires the canonical resource on refresh as well as the code exchange", async () => {
+  const flow = await clientFlow(keys);
+  const { refresh_token } = await flow.connect("fixture-key");
+  const response = await flow.token({ grant_type: "refresh_token", refresh_token });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: "invalid_target" });
+});
+
+it("links issued provider grants and cleans their KV records after account revocation", async () => {
+  const flow = await clientFlow(keys);
+  await flow.connect("fixture-key");
+  const accountId = await flow.env.DB.prepare("SELECT id FROM accounts").first<string>("id");
+  const [grant] = await createStore(flow.env.DB).listGrants(accountId!);
+  const kv = "grant:" + accountId + ":" + grant.providerGrantId;
+  expect(await flow.env.OAUTH_KV.get(kv)).not.toBeNull();
+  expect((await flow.visit("/account/grants/" + grant.id + "/revoke", flow.form({}))).status).toBe(303);
+  expect(await flow.env.OAUTH_KV.get(kv)).toBeNull();
+});
+
+it("preserves the validated request through signed login and key onboarding to explicit consent", async () => {
+  const flow = await clientFlow(keys);
+  const page = await flow.onboard("fixture-upstream-key");
+  const html = await page.clone().text();
+  expect(html).toContain("&lt;b&gt;Unverified&lt;/b&gt;");
+  expect(html).toContain(new URL(redirect).host);
+  expect(html).not.toContain("fixture-upstream-key");
+  expect(page.headers.getSetCookie().some(v => v.startsWith("__Host-oauth-consent"))).toBe(true);
+  const authorized = await flow.decide(page);
+  expect(authorized.status).toBe(303);
+  const callback = new URL(authorized.headers.get("Location")!);
+  expect(callback.searchParams.get("state")).toBe("client-state");
+  const result = await flow.exchange(callback.searchParams.get("code")!);
+  expect(result.status).toBe(200);
+  expect(await result.json()).toMatchObject({ scope: "capy:read offline_access", refresh_token: expect.any(String) });
+});
+
+it("discovers one canonical protected resource and issuer from the bearer challenge", async () => {
+  const env = hostedEnv();
+  const get = (path: string) => worker.fetch(new Request(new URL(path, env.PUBLIC_ORIGIN)), env, createExecutionContext());
+  const resource = env.PUBLIC_ORIGIN + "/mcp";
+  const response = await get(resource);
+  expect(response.status).toBe(401);
+  const metadata = response.headers.get("WWW-Authenticate")?.match(/resource_metadata="([^"]+)"/)?.[1];
+  expect(metadata).toBe(env.PUBLIC_ORIGIN + "/.well-known/oauth-protected-resource/mcp");
+  expect(await (await get(metadata!)).json()).toMatchObject({ resource, authorization_servers: [env.PUBLIC_ORIGIN], scopes_supported: ["capy:read"] });
+  expect(await (await get("/.well-known/oauth-authorization-server")).json()).toMatchObject({
+    issuer: env.PUBLIC_ORIGIN, token_endpoint: env.PUBLIC_ORIGIN + "/token", registration_endpoint: env.PUBLIC_ORIGIN + "/register",
+    scopes_supported: ["capy:read", "capy:write", "offline_access"], client_id_metadata_document_supported: true,
+  });
+});
