@@ -62,6 +62,7 @@ type GrantRow = Omit<AppGrant, "scopes"> & { scopes: string };
 const accountColumns = `accounts.id, accounts.issuer, accounts.subject, accounts.admission_claims AS admissionClaims,
   accounts.credential_version AS credentialVersion, accounts.authorization_epoch AS authorizationEpoch`;
 const loginColumns = `state_hash AS stateHash, browser_hash AS browserHash, verifier, nonce, continuation, expires_at AS expiresAt`;
+const databaseTimeMs = "unixepoch('now') * 1000 + CAST(substr(strftime('%f', 'now'), 4) AS INTEGER)";
 
 function toAccount(row: AccountRow): Account {
   return {
@@ -194,8 +195,8 @@ export function createStore(db: D1Database) {
     async getSession(id: string): Promise<BrowserSession | null> {
       return primary(`
         SELECT account_id AS accountId, csrf_hash AS csrfHash, expires_at AS expiresAt
-        FROM browser_sessions WHERE session_hash = ? AND expires_at > ?
-      `).bind(await hashOpaqueId(id), Date.now()).first<BrowserSession>();
+        FROM browser_sessions WHERE session_hash = ? AND expires_at > (${databaseTimeMs})
+      `).bind(await hashOpaqueId(id)).first<BrowserSession>();
     },
 
     async deleteSession(id: string): Promise<void> {
@@ -211,9 +212,9 @@ export function createStore(db: D1Database) {
 
     async consumeLogin(stateHash: string, browserHash: string): Promise<LoginTransaction | null> {
       return db.prepare(`
-        DELETE FROM login_transactions WHERE state_hash = ? AND browser_hash = ? AND expires_at > ?
+        DELETE FROM login_transactions WHERE state_hash = ? AND browser_hash = ? AND expires_at > (${databaseTimeMs})
         RETURNING ${loginColumns}
-      `).bind(stateHash, browserHash, Date.now()).first<LoginTransaction>();
+      `).bind(stateHash, browserHash).first<LoginTransaction>();
     },
   };
 }

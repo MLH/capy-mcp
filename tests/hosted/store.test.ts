@@ -251,4 +251,40 @@ describe("browser state", () => {
     expect(await store.consumeLogin(login.stateHash, login.browserHash)).toBeNull();
     expect(await env.DB.prepare("SELECT state_hash FROM login_transactions").first("state_hash")).toBe(login.stateHash);
   });
+
+  it("uses the database clock to reject a session that looks live to the Worker", async () => {
+    const store = createStore(env.DB);
+    const { id } = await store.getOrCreateAccount(identity("first"));
+    const sessionId = "test-stale-clock-session";
+    const expiresAt = 1_000;
+    await store.createSession(sessionId, { accountId: id, csrfHash: await hashOpaqueId("test-csrf"), expiresAt });
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(expiresAt - 1);
+    try {
+      expect(await store.getSession(sessionId)).toBeNull();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("uses the database clock to reject and preserve a login that looks live to the Worker", async () => {
+    const store = createStore(env.DB);
+    const login = {
+      stateHash: await hashOpaqueId("test-stale-clock-state"),
+      browserHash: await hashOpaqueId("test-browser-binding"),
+      verifier: "test-pkce-verifier",
+      nonce: "test-login-nonce",
+      continuation: null,
+      expiresAt: 1_000,
+    };
+    await store.createLogin(login);
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(login.expiresAt - 1);
+    try {
+      expect(await store.consumeLogin(login.stateHash, login.browserHash)).toBeNull();
+    } finally {
+      clock.mockRestore();
+    }
+    expect(await env.DB.prepare("SELECT state_hash FROM login_transactions").first("state_hash")).toBe(login.stateHash);
+  });
 });
