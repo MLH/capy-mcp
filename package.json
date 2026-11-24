@@ -32,7 +32,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/core": "2.4.0",
-    "@modelcontextprotocol/server": "2.4.0"
+    "@modelcontextprotocol/server": "2.4.0",
+    "openid-client": "6.9.1"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.5.1",
