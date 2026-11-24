@@ -2,7 +2,7 @@ import { createExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import worker from "../../src/worker.js";
 import { hostedEnv } from "./fixtures.js";
-import { clientFlow, redirect, resource, serveHosted } from "./oauth-flow.js";
+import { clientFlow, completionTarget, redirect, resource, serveHosted } from "./oauth-flow.js";
 import { signingKey } from "./fake-issuer.js";
 import { resetHostedDb } from "./setup.js";
 import { createStore } from "../../src/hosted/store.js";
@@ -12,10 +12,32 @@ beforeAll(async () => { keys = await signingKey(); });
 beforeEach(resetHostedDb);
 afterEach(() => vi.unstubAllGlobals());
 
+it.each(["allow", "deny"])("ends the %s POST on a private same-origin document before navigating back to the client", async decision => {
+  const flow = await clientFlow(keys);
+  const consent = await flow.onboard("fixture-key");
+  expect(consent.headers.get("Content-Security-Policy")).toMatch(/form-action 'self'(?:;|,|$)/);
+  const page = await flow.decide(consent, decision);
+  expect(page.status).toBe(200);
+  expect(page.headers.has("Location")).toBe(false);
+  expect(page.headers.get("Content-Type")).toContain("text/html");
+  expect(page.headers.get("Referrer-Policy")).toBe("no-referrer");
+  expect(page.headers.get("Cache-Control")).toBe("no-store");
+  expect(page.headers.get("Content-Security-Policy")).toMatch(/form-action 'self'(?:;|$)/);
+  expect(page.headers.getSetCookie().some(v => v.startsWith("__Host-oauth-consent") && v.includes("Max-Age=0"))).toBe(true);
+  const next = completionTarget(page);
+  expect(next.origin + next.pathname).toBe(redirect);
+  expect(next.searchParams.get("state")).toBe("client-state");
+  expect(next.searchParams.has("code")).toBe(decision === "allow");
+  const html = await page.text();
+  const code = next.searchParams.get("code");
+  if (code) expect(html.includes(code)).toBe(false);
+  expect(html).not.toMatch(/client-state|code=|state=|client\.example\.invalid|<form|<script/i);
+});
+
 it("rejects a repeated code exchange even if KV returns the pre-exchange grant", async () => {
   const flow = await clientFlow(keys);
   const approved = await flow.decide(await flow.onboard("fixture-key"));
-  const code = new URL(approved.headers.get("Location")!).searchParams.get("code")!;
+  const code = completionTarget(approved).searchParams.get("code")!;
   const owner = await flow.env.DB.prepare("SELECT id FROM accounts").first<string>("id");
   const [entry] = (await flow.env.OAUTH_KV.list({ prefix: "grant:" + owner + ":" })).keys;
   const before = await flow.env.OAUTH_KV.get(entry.name);
@@ -27,7 +49,7 @@ it("rejects a repeated code exchange even if KV returns the pre-exchange grant",
 it("requires fresh consent if issuance fails after the D1 code claim", async () => {
   const flow = await clientFlow(keys);
   const approved = await flow.decide(await flow.onboard("fixture-key"));
-  const code = new URL(approved.headers.get("Location")!).searchParams.get("code")!;
+  const code = completionTarget(approved).searchParams.get("code")!;
   await flow.env.DB.exec("ALTER TABLE credentials RENAME TO unavailable_vault");
   try {
     expect((await flow.exchange(code)).status).toBe(503);
@@ -56,7 +78,7 @@ it("does not apply a stale connect-only onboarding form to a now-connected accou
   const action = (await page.text()).match(/action="(\/account\/key[^"]*)"/)![1];
   expect((await flow.visit("/account/key", flow.form({ key: "current-key" }))).status).toBe(303);
   const allowed = await flow.decide(await flow.authorize());
-  expect((await flow.exchange(new URL(allowed.headers.get("Location")!).searchParams.get("code")!)).status).toBe(200);
+  expect((await flow.exchange(completionTarget(allowed).searchParams.get("code")!)).status).toBe(200);
   const owner = await flow.env.DB.prepare("SELECT id FROM accounts").first<string>("id");
   const state = async () => [await flow.env.DB.prepare("SELECT * FROM credentials").first(),
     await createStore(flow.env.DB).getAccount(owner!), await createStore(flow.env.DB).listGrants(owner!)];
@@ -98,7 +120,7 @@ it("does not issue a refresh token without consent for offline access", async ()
   const flow = await clientFlow(keys);
   await flow.onboard("fixture-key");
   const authorized = await flow.decide(await flow.authorize({ scope: "" }));
-  const response = await flow.exchange(new URL(authorized.headers.get("Location")!).searchParams.get("code")!);
+  const response = await flow.exchange(completionTarget(authorized).searchParams.get("code")!);
   const value = await response.json<Record<string, unknown>>();
   expect(value.scope).toBe("capy:read");
   expect(value).not.toHaveProperty("refresh_token");
@@ -128,9 +150,9 @@ it("denies through the provider's stored redirect and rejects consumed or unboun
   expect((await flow.decide(page.clone())).status).toBe(400);
   flow.cookies.set(...cookie);
   const denied = await flow.decide(page.clone(), "deny");
-  expect(denied.status).toBe(303);
+  expect(denied.status).toBe(200);
   expect(denied.headers.getSetCookie().some(v => v.includes("Max-Age=0"))).toBe(true);
-  const destination = new URL(denied.headers.get("Location")!);
+  const destination = completionTarget(denied);
   expect(destination.origin + destination.pathname).toBe(redirect);
   expect(Object.fromEntries(destination.searchParams)).toMatchObject({ error: "access_denied", state: "client-state" });
   flow.cookies.set(...cookie);
@@ -154,6 +176,7 @@ it.each(["/account/key", "/account/disconnect"])("will not grant from a consent 
   const stale = await flow.decide(page);
   expect(stale.status).toBe(409);
   expect(stale.headers.has("Location")).toBe(false);
+  expect(stale.headers.has("Refresh")).toBe(false);
   expect(await flow.env.DB.prepare("SELECT count(*) FROM app_grants").first("count(*)")).toBe(0);
 });
 
@@ -161,7 +184,7 @@ it("uses the consent form at most once even when both approvals arrive together"
   const flow = await clientFlow(keys);
   const page = await flow.onboard("fixture-key");
   const [a, b] = await Promise.all([flow.decide(page.clone()), flow.decide(page)]);
-  expect([a, b].filter(r => r.status === 303)).toHaveLength(1);
+  expect([a, b].filter(r => r.status === 200)).toHaveLength(1);
   expect(await flow.env.DB.prepare("SELECT count(*) FROM app_grants").first("count(*)")).toBe(1);
 });
 
@@ -173,6 +196,7 @@ it("preserves provider cookie clearing when the authority store fails after appr
     const failed = await flow.decide(page);
     expect(failed.status).toBe(503);
     expect(failed.headers.has("Location")).toBe(false);
+    expect(failed.headers.has("Refresh")).toBe(false);
     expect(failed.headers.getSetCookie().some(v => v.startsWith("__Host-oauth-consent") && v.includes("Max-Age=0"))).toBe(true);
   } finally {
     await flow.env.DB.exec("ALTER TABLE unavailable_snapshots RENAME TO consent_snapshots");
@@ -184,7 +208,7 @@ it("blocks an unexchanged code after revoking its app grant", async () => {
   const approved = await flow.decide(await flow.onboard("fixture-key"));
   const id = await flow.env.DB.prepare("SELECT id FROM app_grants").first<string>("id");
   expect((await flow.visit("/account/grants/" + id + "/revoke", flow.form({}))).status).toBe(303);
-  const code = new URL(approved.headers.get("Location")!).searchParams.get("code")!;
+  const code = completionTarget(approved).searchParams.get("code")!;
   const response = await flow.exchange(code);
   expect(response.status).toBe(400);
   expect(await response.json()).toMatchObject({ error: "invalid_grant" });
@@ -229,7 +253,7 @@ it("rejects modified consent fields and invalid scopes, PKCE or resource indicat
   const handle = (await page.clone().text()).match(/name="handle" value="([^"]+)"/)![1];
   expect((await flow.visit("/consent", flow.form({ handle, decision: "allow", redirect_uri: "https://else.example.invalid/" }))).status).toBe(400);
   const authorized = await flow.decide(page, "allow", true);
-  const code = new URL(authorized.headers.get("Location")!).searchParams.get("code")!;
+  const code = completionTarget(authorized).searchParams.get("code")!;
   expect((await flow.exchange(code, { code_verifier: "wrong".repeat(12) })).status).toBe(400);
   expect((await flow.exchange(code, { resource: resource + "/other" })).status).toBe(400);
 });
@@ -253,7 +277,7 @@ it.each(["/token", "/register", "/authorize"])("rate limits %s before parsing or
 it("rejects a code exchange missing the explicit MCP resource", async () => {
   const flow = await clientFlow(keys);
   const allowed = await flow.decide(await flow.onboard("fixture-key"));
-  const code = new URL(allowed.headers.get("Location")!).searchParams.get("code")!;
+  const code = completionTarget(allowed).searchParams.get("code")!;
   const response = await flow.token({ grant_type: "authorization_code", code, redirect_uri: redirect,
     code_verifier: "fixture-verifier-".repeat(4) });
   expect(response.status).toBe(400);
@@ -288,8 +312,8 @@ it("preserves the validated request through signed login and key onboarding to e
   expect(html).not.toContain("fixture-upstream-key");
   expect(page.headers.getSetCookie().some(v => v.startsWith("__Host-oauth-consent"))).toBe(true);
   const authorized = await flow.decide(page);
-  expect(authorized.status).toBe(303);
-  const callback = new URL(authorized.headers.get("Location")!);
+  expect(authorized.status).toBe(200);
+  const callback = completionTarget(authorized);
   expect(callback.searchParams.get("state")).toBe("client-state");
   const result = await flow.exchange(callback.searchParams.get("code")!);
   expect(result.status).toBe(200);

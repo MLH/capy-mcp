@@ -1,7 +1,7 @@
 import { AuthorizationError, GrantType, OAuthError, OAuthProvider, type OAuthHelpers, type OAuthResourceContext } from "./generated-provider/oauth-provider.js";
 import { beginLogin, browserResponse, csrfToken, finishLogin, logout, requireMutation, requireSession } from "./browser.js";
 import { handleAccount } from "./account.js";
-import { connectForConsent, consentPage } from "./pages.js";
+import { connectForConsent, consentComplete, consentPage } from "./pages.js";
 import { transactions } from "./transactions.js";
 import { createStore } from "./store.js";
 import { currentCredential, grantProps, handleMcp } from "./mcp.js";
@@ -22,7 +22,8 @@ export async function handleAuthorization(request: Request, env: Env, oauth: OAu
     if (!handle || !/^[\w-]{43}$/.test(handle) || decision !== "allow" && decision !== "deny" ||
         [...form.keys()].some(k => !["csrf", "handle", "decision", "write"].includes(k) || form.getAll(k).length !== 1) ||
         form.has("write") && form.get("write") !== "yes") return problem(400);
-    const result = decision === "deny" ? await oauth.denyConsent(request, handle) : await oauth.approveConsent(request, handle);
+    const result = decision === "deny" ? await oauth.denyConsent(request, handle) :
+      { ...await oauth.approveConsent(request, handle), redirectTo: null };
     let appGrantId: string | undefined;
     try {
       const snapshot = await pending.consume(handle, session.csrfHash, account.id);
@@ -30,7 +31,7 @@ export async function handleAuthorization(request: Request, env: Env, oauth: OAu
         result.headers.delete("Location");
         return problem(409, result.headers);
       }
-      if ("redirectTo" in result) return browserResponse(null, { status: 303, headers: result.headers });
+      if (result.redirectTo !== null) return consentComplete(result.redirectTo, result.headers);
       const approved = result.request;
       if (form.has("write") && !approved.scope.includes("capy:write")) return problem(400, result.headers);
       const scope = approved.scope.filter(s => s !== "capy:write" || form.has("write"));
@@ -44,8 +45,7 @@ export async function handleAuthorization(request: Request, env: Env, oauth: OAu
       const { redirectTo } = await oauth.completeAuthorization({
         request: approved, userId: account.id, metadata: {}, scope, props, revokeExistingGrants: false,
       });
-      result.headers.set("Location", redirectTo);
-      return browserResponse(null, { status: 303, headers: result.headers });
+      return consentComplete(redirectTo, result.headers);
     } catch {
       if (appGrantId) await store.revokeGrant(account.id, appGrantId).catch(() => {});
       result.headers.delete("Location");

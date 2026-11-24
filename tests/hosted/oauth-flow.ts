@@ -8,6 +8,12 @@ export const redirect = "https://client.example.invalid/callback";
 const verifier = "fixture-verifier-".repeat(4);
 export const serveHosted = (request: Request, env: Env) => worker.fetch(request, env, createExecutionContext());
 
+export function completionTarget(response: Response): URL {
+  const url = /^0; url="([^"]+)"$/.exec(response.headers.get("Refresh") ?? "")?.[1];
+  if (!url) throw new Error("Missing consent completion navigation");
+  return new URL(url);
+}
+
 export async function clientFlow(keys: CryptoKeyPair, subject = "member-1") {
   const oidc = await fakeIssuer(keys, { claims: { sub: subject } });
   const env = { ...oidc.env, ACCOUNT_RATE_LIMITER: { limit: async () => ({ success: true }) } };
@@ -79,8 +85,8 @@ export async function clientFlow(keys: CryptoKeyPair, subject = "member-1") {
   }
   async function connect(key: string, write = false) {
     const authorized = await decide(await onboard(key), "allow", write);
-    expect(authorized.status).toBe(303);
-    const code = new URL(authorized.headers.get("Location")!).searchParams.get("code")!;
+    expect(authorized.status).toBe(200);
+    const code = completionTarget(authorized).searchParams.get("code")!;
     const response = await exchange(code);
     expect(response.status).toBe(200);
     return response.json<{ access_token: string; refresh_token: string; scope: string }>();

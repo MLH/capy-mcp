@@ -12,25 +12,33 @@ import { unstable_splitSqlQuery } from "wrangler";
 
 const callbacks = [];
 const disclosures = [];
-const client = createServer((req, res) => {
+const receiver = (req, res) => {
   const url = new URL(req.url, "http://localhost");
   if (url.pathname === "/callback") {
-    callbacks.push(url.searchParams.has("code") ? "allow" : url.searchParams.get("error"));
+    const allowed = Boolean(url.searchParams.get("code")) && !url.searchParams.has("error");
+    const denied = !url.searchParams.has("code") && url.searchParams.get("error") === "access_denied";
+    if (url.searchParams.get("state") === "fixture" && (allowed || denied)) {
+      callbacks.push(req.headers.host + "/" + (allowed ? "allow" : "access_denied"));
+    }
     if (req.headers.referer || req.headers.cookie) disclosures.push("Unexpected callback referrer or cookie");
   }
   res.end("Client callback");
-});
-async function listen(server) {
-  server.listen(0, "127.0.0.1");
+};
+const client = createServer(receiver);
+const ipv6Client = createServer(receiver);
+async function listen(server, host = "127.0.0.1") {
+  server.listen(0, host);
   await once(server, "listening");
   return server.address().port;
 }
 const clientPort = await listen(client);
+const ipv6Port = await listen(ipv6Client, "::1");
 const reservation = createServer();
 const port = await listen(reservation);
 await new Promise(resolve => reservation.close(resolve));
 const origin = "https://127.0.0.1:" + port;
 const redirect = "http://localhost:" + clientPort + "/callback";
+const ipv6Redirect = "http://[::1]:" + ipv6Port + "/callback";
 const issuer = "https://id.example.invalid";
 const profile = await mkdtemp(join(tmpdir(), "consent-fixture-"));
 const metadata = "https://client-metadata.example.invalid/client.json";
@@ -68,11 +76,11 @@ try {
   await db.prepare("INSERT INTO credentials VALUES (?, 'v1', ?, ?, 1)").bind(account, "A".repeat(16), "A".repeat(24)).run();
   await db.prepare("INSERT INTO browser_sessions VALUES (?, ?, ?, ?)").bind(digest(session), account, digest(csrf), Date.now() + 300_000).run();
   const registration = await mf.dispatchFetch(origin + "/register", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_name: "Browser test", redirect_uris: [redirect], token_endpoint_auth_method: "none" }) });
+    body: JSON.stringify({ client_name: "Browser test", redirect_uris: [redirect, ipv6Redirect], token_endpoint_auth_method: "none" }) });
   assert.equal(registration.status, 201);
   const { client_id } = await registration.json();
-  const authorize = id => origin + "/authorize?" + new URLSearchParams({ client_id: id, resource: origin + "/mcp", response_type: "code",
-    scope: "capy:read", state: "fixture", redirect_uri: redirect, code_challenge_method: "S256", code_challenge: opaque() });
+  const authorize = (id, redirectUri = redirect) => origin + "/authorize?" + new URLSearchParams({ client_id: id, resource: origin + "/mcp", response_type: "code",
+    scope: "capy:read", state: "fixture", redirect_uri: redirectUri, code_challenge_method: "S256", code_challenge: opaque() });
   const cimd = await mf.dispatchFetch(authorize(metadata), { headers: { Cookie: "__Host-capy-session=" + session + "; __Host-capy-csrf=" + csrf } });
   if (cimd.status === 200 || followed !== 0) failures.push("CIMD followed or accepted cross-origin metadata");
   chrome = spawn(process.env.CHROMIUM_BIN || "chromium", ["--headless", "--no-sandbox", "--disable-dev-shm-usage",
@@ -128,11 +136,13 @@ try {
     }
     assert.ok(clicked, "Form button not rendered: " + selector);
   }
-  for (const decision of ["allow", "deny"]) {
-    await clickFormButton(authorize(client_id), `button[value="${decision}"]`);
-    const expected = decision === "allow" ? "allow" : "access_denied";
-    for (let i = 0; i < 25 && !callbacks.includes(expected); i++) await delay(80);
-    if (!callbacks.includes(expected)) failures.push("Chromium did not reach the registered client on " + decision);
+  for (const uri of [redirect, ipv6Redirect]) {
+    for (const decision of ["allow", "deny"]) {
+      await clickFormButton(authorize(client_id, uri), `button[value="${decision}"]`);
+      const expected = new URL(uri).host + "/" + (decision === "allow" ? "allow" : "access_denied");
+      for (let i = 0; i < 25 && !callbacks.includes(expected); i++) await delay(80);
+      if (!callbacks.includes(expected)) failures.push("No callback for " + new URL(uri).hostname + " " + decision);
+    }
   }
   await clickFormButton(origin + "/account?confirm=disconnect", 'form[action="/account/disconnect"] button');
   for (let i = 0; i < 25; i++) {
@@ -143,11 +153,13 @@ try {
     "Account form POST must pass the actual trusted Origin/CSRF guards");
   assert.deepEqual(failures, [], JSON.stringify({ failures, navigations }));
   assert.deepEqual(disclosures, []);
-  console.log("PASS: workerd refused redirected CIMD without a second fetch; Chromium reached the registered client on Allow and Deny without exposing a referrer/cookie, and submitted a guarded account disconnect.");
+  console.log("PASS: workerd refused redirected CIMD; Chromium delivered Allow and Deny on both localhost and [::1] without a referrer/cookie, and submitted a guarded account disconnect.");
 } finally {
   if (chrome && chrome.exitCode === null) { const closed = once(chrome, "exit"); chrome.kill(); await closed; }
   await mf.dispose();
-  client.closeAllConnections();
-  await new Promise(resolve => client.close(resolve));
+  for (const server of [client, ipv6Client]) {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
   await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
