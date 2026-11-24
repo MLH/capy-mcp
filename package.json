@@ -1,8 +1,12 @@
 {
-  "name": "capy-mcp",
-  "version": "0.0.0",
+  "name": "@mlhacks/capy-mcp",
+  "version": "0.1.0",
   "description": "Schema-validated Capy API tools over local STDIO and authenticated Workers MCP HTTP",
-  "private": true,
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mlh/capy-mcp.git"
@@ -15,7 +19,7 @@
   "bin": {
     "capy-mcp": "dist/stdio.js"
   },
-  "files": ["dist/stdio.js"],
+  "files": ["dist/stdio.js", "dist/THIRD_PARTY_NOTICES.txt"],
   "engines": {
     "node": ">=22"
   },
@@ -23,6 +27,7 @@
     "prepare": "node scripts/prepare-oauth-provider.mjs",
     "check:provider": "node scripts/prepare-oauth-provider.mjs --check",
     "build": "tsx scripts/build.ts",
+    "prepack": "npm run build",
     "test": "npm run build && vitest run && npm run test:worker",
     "test:worker": "vitest run --config vitest.workers.config.ts",
     "test:browser-consent": "npm run worker:check && tsx tests/hosted/browser-consent.mjs",

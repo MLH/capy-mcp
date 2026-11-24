@@ -1,6 +1,6 @@
 # Contributing
 
-This repository is private and its package is unpublished. MLH must choose a license before open-source publication or public distribution; do not add a license on MLH's behalf.
+MLH approved public distribution under the MIT license. The [release runbook](docs/npm-release.md) describes stage-only trusted publishing through GitHub Actions and the separate npm 2FA approval. Do not publish directly or approve a staged version as part of CI.
 
 ## Development
 
@@ -28,7 +28,7 @@ Write a failing regression before changing functional code, then run the relevan
 
 `npm run test:browser-consent` first dry-runs the Worker bundle, then launches it with local workerd, D1 and KV and drives an isolated Chromium profile. It exercises real form navigation and cookies, signed fake OIDC for admission and denial, the fake Capy key connection, consent, code exchange, an MCP read, revocation and the localhost/IPv6 callback handoffs. The fixture intercepts Worker outbound requests instead of contacting any real service; don't add real keys, accounts or billable calls. No production bypass is needed. To recapture the [reviewed screenshots](docs/images/hosted-oidc), run `HOSTED_SCREENSHOT_DIR=docs/images/hosted-oidc npm run test:browser-consent` and visually review all nine PNGs, including the two in `mobile/`, before committing. Captures exclude browser chrome, leave key inputs blank, and redact even the unsigned fixture callback URL in the consent image.
 
-`npm run worker:check` only bundles to ignored `dist/worker`; it does not deploy. `npm pack --dry-run` lists intended package contents; `npm run check:artifacts` builds a temporary tarball, verifies its exact contents, initializes the unpacked STDIO executable, and installs and starts it in a fresh offline npm consumer with an empty cache and no runtime dependencies. It scans emitted Worker files and source maps for a fixed list of known fixture and local secret-file markers; this is not a general secret scanner. `private: true` must remain until publication and licensing are explicitly authorized.
+`npm run worker:check` only bundles to ignored `dist/worker`; it does not deploy. `npm pack --dry-run` lists intended package contents. `prepack` rebuilds the CLI and bundled dependency notices so packing does not depend on a stale executable. `npm run check:artifacts` removes those generated artifacts before packing, verifies the exact tarball contents, initializes the extracted executable, installs and starts it in a fresh offline consumer, and starts it through fresh-cache offline `npx`. These checks use fixture keys and no runtime dependencies. Passing a destination as `npm run check:artifacts -- <directory>` retains the exact verified tarball for the release workflow, not a second unchecked build. The check scans emitted Worker files and source maps for a fixed list of known fixture and local secret-file markers; this is not a general secret scanner.
 
 ## Pinned API contract
 

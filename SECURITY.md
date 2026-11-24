@@ -26,4 +26,4 @@ If a credential is exposed, revoke/rotate it promptly with its issuer and review
 
 ## Release status
 
-The package remains `private: true` and unpublished, without a selected license. MLH must approve a license and publication separately. Local tests and bundle checks are not a security audit or proof of live IdP, Capy, MCP client or deployed Cloudflare compatibility.
+MLH approved public distribution of `@mlhacks/capy-mcp` under MIT. The release workflow uses GitHub OIDC to stage the exact verified tarball; a maintainer must separately approve it with npm 2FA. Configure the npm trusted publisher to permit staging only, without direct publishing or dist-tag changes. Never add a long-lived npm token to the workflow. Local tests and bundle checks are not a security audit or proof of a live npm release, IdP, Capy, MCP client or deployed Cloudflare compatibility. See the [release runbook](docs/npm-release.md).

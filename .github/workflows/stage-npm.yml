@@ -1,0 +1,80 @@
+name: Stage npm release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage-npm
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24.22.1"
+          package-manager-cache: false
+      - run: npm install --global npm@11.19.1 --ignore-scripts
+      - run: npm ci
+      - run: npm run check:provider
+      - run: npm run generate:check
+      - run: npm run types:worker:check
+      - run: npm run typecheck
+      - run: npm test
+      - name: Check local migrations
+        run: |
+          npx wrangler d1 migrations apply DB --local --persist-to "$RUNNER_TEMP/capy-d1"
+          npx wrangler d1 migrations list DB --local --persist-to "$RUNNER_TEMP/capy-d1"
+      - name: Verify signed browser onboarding
+        timeout-minutes: 3
+        run: |
+          CHROMIUM_BIN="$(command -v google-chrome || command -v chromium)"
+          export CHROMIUM_BIN
+          npm run test:browser-consent
+      - run: npm audit --audit-level=high
+      - run: npm pack --dry-run
+      - name: Verify and retain the exact release tarball
+        run: npm run check:artifacts -- "$RUNNER_TEMP/npm-release"
+      - run: git diff --check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-release
+          path: ${{ runner.temp }}/npm-release/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  stage:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24.22.1"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.19.1 --ignore-scripts
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: npm-release
+          path: npm-release
+      - name: Stage the verified tarball using GitHub OIDC
+        working-directory: npm-release
+        run: |
+          packages=(*.tgz)
+          test "${#packages[@]}" -eq 1
+          npm stage publish "${packages[0]}" --access public --tag latest --provenance

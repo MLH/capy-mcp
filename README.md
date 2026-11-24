@@ -2,7 +2,19 @@
 
 Expose 102 named Capy API tools to external MCP clients through local STDIO or a self-hosted Cloudflare Worker. Both transports use the same generated schemas, validation, group filtering, and bounded API client. The upstream origin is fixed to `https://api.capy.ai`. The server has no client-specific runtime dependency.
 
-This package is **private and unpublished**. Run the built local file; there is no published npm package to install with `npx`. MLH must choose a license before open-source publication or public distribution. No license is granted by this repository's current packaging.
+The Capy name and branding belong to [Scrapybara, Inc.](https://scrapybara.com/). This is an independent integration maintained by Major League Hacking PBC Inc., not an official Scrapybara product; references to Capy do not imply sponsorship or endorsement. This project's MIT license does not grant rights to Capy's name or branding.
+
+Licensed under [MIT](LICENSE). Public npm releases use staged publishing through GitHub Actions OIDC, followed by a maintainer's npm 2FA approval. A staged version is not installable until approved; see the [release runbook](docs/npm-release.md).
+
+## npm STDIO installation
+
+Once version `0.1.0` has been approved on npm, use Node.js 22+ and supply your own `CAPY_API_KEY` through your MCP client's secure process environment:
+
+```sh
+npx --yes @mlhacks/capy-mcp@0.1.0
+```
+
+For MCP clients, set the command to `npx` and arguments to `["--yes", "@mlhacks/capy-mcp@0.1.0"]`. Pin an approved version rather than silently taking future releases. No global installation, build tools, Cloudflare configuration or hosted OAuth login is needed. The process uses your key's Capy permissions and the tool groups described below.
 
 ## Local installation and STDIO
 
@@ -160,4 +172,4 @@ There is no legacy SSE transport, polling daemon, or arbitrary HTTP proxy.
 
 ## Checks and contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete credential-free checks, fixture browser walkthrough, and contract refresh. CI runs the same checks on Node 22 and 24. See [SECURITY.md](SECURITY.md) for trust boundaries, observability, and reporting. The npm package contains the standalone CLI, manifest and this README only; it does not contain the Worker, fixture media or secrets. No live connection or deployment was verified as part of local acceptance.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete credential-free checks, fixture browser walkthrough, and contract refresh. CI runs the same checks on Node 22 and 24. See [SECURITY.md](SECURITY.md) for trust boundaries, observability, and reporting. The npm package contains only the standalone CLI, manifest, README, MIT license and bundled dependency notices; it does not contain the Worker, fixture media or secrets. Local artifact checks do not prove an approved registry release or a live Capy connection.
