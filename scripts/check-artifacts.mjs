@@ -27,6 +27,8 @@ try {
   const manifest = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
   assert.deepEqual(manifest.bin, { "capy-mcp": "dist/stdio.js" });
   assert.equal(manifest.name, "@mlhacks/capy-mcp");
+  assert.deepEqual(manifest.repository, { type: "git", url: "git+https://github.com/MLH/capy-mcp.git" },
+    "Repository identity must match GitHub provenance, including case");
   assert.notEqual(manifest.private, true);
   assert.equal(manifest.license, "MIT");
   assert.deepEqual(manifest.publishConfig, { access: "public", registry: "https://registry.npmjs.org" });
