@@ -1,6 +1,6 @@
 # Hosted Capy MCP deployment runbook
 
-This runbook is for an authorized operator. It does not select a Cloudflare account, Worker, hostname, identity tenant, or registration. The checked-in origins and D1/KV IDs are placeholders for local checks. Get approval for the target and arrange secure provisioning before running any remote command. Keep test identity and intercepted network traffic out of the deployed Worker.
+This runbook is for an authorized operator. `wrangler.jsonc` uses placeholder origins and D1/KV IDs for local checks; `wrangler.production.jsonc` records the approved MLH target below. Get approval for the target and arrange secure provisioning before running any remote command. Keep test identity and intercepted network traffic out of the deployed Worker.
 
 ## Register one identity provider and set admission
 
@@ -27,7 +27,7 @@ Admission requires an explicit rule. If you set both a subject list and a claim 
 - **Google Workspace:** Register a Web application at Google and add the exact callback to its authorized redirect URIs. For example, set `OIDC_ISSUER` to `https://accounts.google.com`, the admission claim to `hd`, and the claim values to `["workspace.example.invalid"]` (replace the example with an approved Workspace domain). The signed hosted-domain claim is the authority; an email suffix or login screen hint is not.
 - **Microsoft Entra:** Register a Web application for the approved tenant and add the exact callback. Use the tenant-specific v2 issuer `https://login.microsoftonline.com/<tenant-id>/v2.0` rather than `common` or `organizations`; set the admission claim to `tid` and the claim values to `["<tenant-id>"]` with the approved tenant ID. Confirm the registration issues v2 ID tokens with that issuer and claim. Use subjects from this app's tokens when limiting membership further.
 
-The Google and Entra claim shapes are covered by signed fixtures. Neither real registration, tenant, callback nor live IdP has been verified.
+The Google and Entra claim shapes are covered by signed fixtures. Real Google sign-in and callback were confirmed for the MLH deployment below; real Entra sign-in and a deliberately rejected real identity remain unverified.
 
 ## Provision and deploy to the approved target
 
@@ -35,9 +35,33 @@ The Google and Entra claim shapes are covered by signed fixtures. Neither real r
 
 The approved MLH target uses `wrangler.production.jsonc`, `https://capy-mcp.mlhtools.com`, Google project `capy-mcp`, D1 `capy-mcp-prod`, and KV `capy-mcp-oauth`. The application's admission rule checks Google's signed `hd` claim for `majorleaguehacking.com`; group admission is enforced separately by Cloudflare Access.
 
-Before exposing this hostname, verify that the **Capy MCP** self-hosted Access application protects the entire hostname and allows only `sg-capy-mcp-access@majorleaguehacking.com` through the **Major League Hacking** Google Workspace identity provider. Keep Access Managed OAuth disabled on this application because the Worker already issues its own MCP OAuth challenges and tokens. Keep `workers_dev` and `preview_urls` disabled, with no unauthenticated path exceptions or bypass policies. This uses an Internet-facing Cloudflare edge protected by Access, not private network routing.
+The **Capy MCP** self-hosted Access application is the hostname-wide default and allows only `sg-capy-mcp-access@majorleaguehacking.com` through the **Major League Hacking** Google Workspace identity provider. Keep this application and its group policy intact. Keep Access Managed OAuth disabled on the origin applications because the Worker already issues its own MCP OAuth challenges and tokens. Keep `workers_dev` and `preview_urls` disabled. This uses an Internet-facing Cloudflare edge, not private network routing.
 
-An unauthenticated client, including an MCP portal's server-side connection without suitable Access authentication, will be blocked before reaching the Worker. Portal interoperability is a separate live check; do not weaken Access or replace per-user OAuth with a shared Capy key just to make a connection succeed. Use the same production config for migration and deployment commands below.
+#### MCP Portal protocol exceptions
+
+On 2026-11-24, the operator approved retaining the application's per-user OAuth and exposing only its machine protocol paths through Access, without changing or redeploying application code. Whole-host Access had returned its own login redirect and Cloudflare Access metadata challenge to the Portal's backend, preventing discovery of the application's OAuth server.
+
+A separate self-hosted Access application, **Capy MCP: app-owned OAuth protocol endpoints** (`57dfc156-998c-43ed-ae02-51d5620816e3`), has only these public destinations on `capy-mcp.mlhtools.com`:
+
+| Path | Purpose |
+| --- | --- |
+| `/mcp` | MCP resource; the application still requires its own valid OAuth bearer token. |
+| `/token` | Authorization-code exchange, refresh and revocation. |
+| `/register` | OAuth client registration; registration alone grants no account or MCP access. |
+| `/.well-known/oauth-authorization-server` | Application authorization-server metadata. |
+| `/.well-known/oauth-protected-resource` | Protected-resource metadata namespace, including the actual `/mcp` metadata suffix. |
+
+This application attaches reusable policy `ade8a8a7-79c6-4548-8b58-384c85e3225a`, with decision `bypass` and include `everyone`. It is hidden from the app launcher, with Managed OAuth and preflight bypass disabled. Cloudflare's [most-specific application path](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/) takes precedence over the hostname default; these paths and their descendants bypass Access enforcement and Access logging, while other zone controls still apply. Unsupported protocol descendants return application 404 responses. Do not broaden this to the hostname or general `/.well-known/*`.
+
+Root, `/account`, `/auth/*`, `/authorize`, `/consent` and `/oauth/resume` remain behind the original group-restricted Access application. Browser authorization can authenticate through Access; server-side discovery, registration and token exchange must reach the application's OAuth directly. The Portal's separate `mcp` Access application for upstream `capy` retains the same group restriction. Do not enable origin Managed OAuth or replace individual Capy keys with a shared key.
+
+These protocol endpoints are now Internet-reachable, not anonymously authorized. Application identity remains `(issuer, sub)`, with signed `hd` admission, individual encrypted Capy keys, scope consent and authoritative D1 grant revocation. Group membership is checked by Access on the browser flow, not on every application bearer-token request. Removing someone from the group does not itself revoke their existing application grants; use the revocation/offboarding procedure below.
+
+Live anonymous checks confirmed application JSON metadata with the canonical issuer/resource, 401 Bearer challenges for unauthenticated MCP GET/POST/OPTIONS and invalid tokens, and application OAuth errors for invalid token exchanges and registration requests. The bare protected-resource namespace returns 404; the advertised `/.well-known/oauth-protected-resource/mcp` returns 200. Browser/account/authorization routes still redirect to Access. The Worker version and telemetry settings were unchanged. This proves routing and anonymous denial, not successful Portal OAuth, capability sync or an authorized tool call.
+
+Retry **Authenticate** on the existing `capy` upstream, configured with `https://capy-mcp.mlhtools.com/mcp`, OAuth and the shared OAuth callback. Complete the personal Google/Access sign-in and application consent, then verify capability sync and one safe read. Preserve per-person authorization when mapping it into a Portal; no Portal mapping was changed by the exception setup. Refresh/revocation through the Portal, a denied real identity, deployed telemetry privacy and backup restoration still need live verification.
+
+To roll back the exceptions, delete only Access application `57dfc156-998c-43ed-ae02-51d5620816e3`, leaving the hostname-wide application and its group policy untouched. Verify anonymous protocol requests again redirect to Access; the Portal will stop working until a compatible route is restored. Remove the reusable bypass policy only if unused. This rollback changes no Worker code, secrets, D1/KV state or existing grants. Use the same production config for migration and deployment commands below.
 
 ### Operator procedure
 
