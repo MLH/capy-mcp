@@ -4,7 +4,9 @@ This runbook is for an authorized operator. It does not select a Cloudflare acco
 
 ## Register one identity provider and set admission
 
-Register one confidential OIDC web application with authorization code flow, S256 PKCE, and one exact web callback: `<PUBLIC_ORIGIN>/auth/callback`. Set `PUBLIC_ORIGIN` to the approved HTTPS origin with no trailing slash, path, or query. Use that origin consistently for the callback, account page, MCP resource and authorization-server discovery. OAuth clients have their own independently registered redirect URIs; don't add those to the IdP app. The Worker requests `openid`, discovers the issuer's endpoints, and accepts `client_secret_post` or `client_secret_basic`. The issuer and its discovered endpoints must be publicly reachable over HTTPS. Never use an arbitrary issuer selected by a browser or client.
+Register one confidential OIDC web application with authorization code flow, S256 PKCE, and one exact web callback: `<PUBLIC_ORIGIN>/auth/callback`. Set `PUBLIC_ORIGIN` to the approved HTTPS origin with no trailing slash, path, or query. Use that origin consistently for the callback, account page, MCP resource and authorization-server discovery. OAuth clients have their own independently registered redirect URIs; don't add those to the IdP app. The Worker requests `openid` and discovers the issuer's endpoints. The issuer and its discovered endpoints must be publicly reachable over HTTPS. Never use an arbitrary issuer selected by a browser or client.
+
+Match the registration's token-endpoint authentication setting to discovery's `token_endpoint_auth_methods_supported`. The Worker uses `client_secret_post` whenever advertised, even when both methods are listed, so the app must accept POST in that case. It uses `client_secret_basic` only when POST is not advertised and Basic is advertised, or when the discovery field is absent. If neither supported method is advertised, sign-in fails. The Worker does not retry a rejected POST exchange with Basic.
 
 Set the public values under `vars` in the approved Wrangler config:
 

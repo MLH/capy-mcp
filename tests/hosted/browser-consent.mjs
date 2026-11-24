@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { convertV4MiniflareOptions, Miniflare, Response as MfResponse } from "miniflare";
 import { unstable_splitSqlQuery } from "wrangler";
 import { browserIssuer } from "./fixtures/browser-issuer.mjs";
+import { watchBrowser } from "./fixtures/browser-lifecycle.ts";
 
 const callbacks = new Map();
 const receiver = (req, res) => {
@@ -71,7 +72,7 @@ const mf = new Miniflare(convertV4MiniflareOptions({
     return issuerFetch(req);
   },
 }));
-let chrome;
+let stopChrome;
 try {
   await mf.ready;
   const db = await mf.getD1Database("DB");
@@ -93,11 +94,12 @@ try {
   const cimd = await mf.dispatchFetch(authorization(metadata, redirect).url, { redirect: "manual" });
   assert.equal(cimd.status, 503);
   assert.equal(followed, 0, "CIMD must not follow redirected metadata");
-  chrome = spawn(process.env.CHROMIUM_BIN || "chromium", ["--headless", "--no-sandbox", "--disable-dev-shm-usage",
+  const chrome = spawn(process.env.CHROMIUM_BIN || "chromium", ["--headless", "--no-sandbox", "--disable-dev-shm-usage",
     "--ignore-certificate-errors", "--disable-background-networking", "--no-first-run", "--no-proxy-server",
     "--host-resolver-rules=MAP id.example.invalid 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1], EXCLUDE ::1",
     "--remote-debugging-pipe", "--user-data-dir=" + join(profile, "chromium")],
   { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+  stopChrome = watchBrowser(chrome);
   const commands = new Map();
   let sequence = 0, pending = "";
   chrome.stdio[4].setEncoding("utf8");
@@ -252,11 +254,14 @@ try {
   assert.equal(await db.prepare("SELECT authorization_epoch FROM accounts").first("authorization_epoch"), 1);
   console.log("PASS: signed cross-site OIDC admission and denial, Capy onboarding, consent and OAuth PKCE exchange, authenticated MCP call, closed revocation, guarded disconnect, and private IPv4/IPv6 loopback callbacks.");
 } finally {
-  if (chrome && chrome.exitCode === null) { const closed = once(chrome, "exit"); chrome.kill(); await closed; }
-  await mf.dispose();
-  for (const server of [client, ipv6Client, issuerServer]) {
-    server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
+  try {
+    await stopChrome?.();
+  } finally {
+    await mf.dispose();
+    for (const server of [client, ipv6Client, issuerServer]) {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
-  await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
