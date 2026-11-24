@@ -10,7 +10,35 @@ import { createStore } from "../../src/hosted/store.js";
 let keys: CryptoKeyPair;
 beforeAll(async () => { keys = await signingKey(); });
 beforeEach(resetHostedDb);
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+it("fails closed on a metadata provider exception and emits only a fixed warning", async () => {
+  const flow = await clientFlow(keys);
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const clientId = "https://unavailable.example.invalid/metadata/sentinel-path";
+  vi.stubGlobal("fetch", async () => { throw new Error("sentinel-provider-error"); });
+  const response = await flow.authorize({ client_id: clientId });
+  expect(response.status).toBe(503);
+  expect((await response.text()).includes("sentinel")).toBe(false);
+  expect(response.headers.has("Location")).toBe(false);
+  expect(await flow.env.DB.prepare("SELECT count(*) AS total FROM app_grants").first("total")).toBe(0);
+  expect(warning.mock.calls.length).toBe(1);
+  expect(JSON.stringify(warning.mock.calls).includes("sentinel")).toBe(false);
+  expect(warning).toHaveBeenCalledWith("CIMD fetch failed");
+});
+
+it("fails closed before registration when the limiter throws without exposing its error", async () => {
+  const env = hostedEnv({ AUTH_RATE_LIMITER: { limit: async () => { throw new Error("sentinel-limiter-error"); } } });
+  const registrations = () => env.OAUTH_KV.list({ prefix: "client:" }).then(page => page.keys.length);
+  const before = await registrations();
+  const response = await serveHosted(new Request(env.PUBLIC_ORIGIN + "/register", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_name: "Fixture client", redirect_uris: [redirect], token_endpoint_auth_method: "none" }),
+  }), env);
+  expect(response.status).toBe(503);
+  expect((await response.text()).includes("sentinel")).toBe(false);
+  expect(await registrations()).toBe(before);
+});
 
 it.each(["allow", "deny"])("ends the %s POST on a private same-origin document before navigating back to the client", async decision => {
   const flow = await clientFlow(keys);

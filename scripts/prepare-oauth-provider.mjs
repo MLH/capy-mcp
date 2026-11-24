@@ -21,6 +21,14 @@ let patched = replaceOnce(js, "return fetch(metadataUrl, {", 'return fetch(metad
 patched = replaceOnce(patched, "if (!response.ok) {\n\t\t\tawait response.body?.cancel()", "if (response.status !== 200) {\n\t\t\tawait response.body?.cancel()");
 const revoke = "if (grantData.clientId !== clientInfo.clientId) return false;\n\t\tawait this.createOAuthHelpers(env).revokeGrant(grantId, userId);";
 patched = replaceOnce(patched, revoke, revoke.replace("await this.createOAuthHelpers", "await this.options.onVerifiedRefreshRevocation?.({ userId, grantId, clientId: clientInfo.clientId, env });\n\t\tawait this.createOAuthHelpers"));
+const diagnostics = [
+  ['const ageSeconds = Math.max(0, Math.floor(Date.now() / 1e3) - lastGood.storedAt);\n\t\t\t\tconst reason = originError instanceof Error ? originError.message : String(originError);\n\t\t\t\tconsole.warn(`CIMD origin unavailable for ${metadataUrl}, using copy stored ${ageSeconds}s ago: ${reason}`);', 'console.warn("CIMD origin unavailable; using last known good metadata");'],
+  ['onError: ({ status, code, description }) => console.warn(`OAuth error response: ${status} ${code} - ${description}`),', 'onError: ({ status }) => console.warn("OAuth error response", status),'],
+  ['} catch (revokeError) {\n\t\t\t\tconsole.warn(`Failed to revoke grant ${options.grantId} after tokenExchangeCallback answered invalid_grant:`, revokeError);', '} catch {\n\t\t\t\tconsole.warn("Provider grant cleanup failed");'],
+  ['} catch (error) {\n\t\t\tconsole.warn(`Failed to renew client registration ${client.clientId}:`, error);', '} catch {\n\t\t\tconsole.warn("Provider client registration renewal failed");'],
+  ['console.warn(`CIMD fetch failed for ${clientId}:`, error instanceof Error ? error.message : error);', 'console.warn("CIMD fetch failed");'],
+];
+for (const [before, after] of diagnostics) patched = replaceOnce(patched, before, after);
 const iface = "interface OAuthProviderOptions<Env = Cloudflare.Env> {";
 const declarations = replaceOnce(types, iface, iface + "\n  onVerifiedRefreshRevocation?: (grant: { userId: string; grantId: string; clientId: string; env: Env }) => Promise<void>;");
 const check = process.argv.includes("--check");

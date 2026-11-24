@@ -1,0 +1,55 @@
+# Hosted Capy MCP deployment runbook
+
+This runbook is for an authorized operator. It does not select a Cloudflare account, Worker, hostname, identity tenant, or registration. The checked-in origins and D1/KV IDs are placeholders for local checks. Get approval for the target and arrange secure provisioning before running any remote command. Keep test identity and intercepted network traffic out of the deployed Worker.
+
+## Register one identity provider and set admission
+
+Register one confidential OIDC web application with authorization code flow, S256 PKCE, and one exact web callback: `<PUBLIC_ORIGIN>/auth/callback`. Set `PUBLIC_ORIGIN` to the approved HTTPS origin with no trailing slash, path, or query. Use that origin consistently for the callback, account page, MCP resource and authorization-server discovery. OAuth clients have their own independently registered redirect URIs; don't add those to the IdP app. The Worker requests `openid`, discovers the issuer's endpoints, and accepts `client_secret_post` or `client_secret_basic`. The issuer and its discovered endpoints must be publicly reachable over HTTPS. Never use an arbitrary issuer selected by a browser or client.
+
+Set the public values under `vars` in the approved Wrangler config:
+
+| Setting | Value |
+| --- | --- |
+| `PUBLIC_ORIGIN` | Canonical HTTPS origin for this deployment. |
+| `OIDC_ISSUER` | Exact issuer identifier from the provider's discovery document. |
+| `OIDC_CLIENT_ID` | Registered OIDC web application client ID. |
+| `OIDC_ALLOWED_SUBJECTS` | JSON array of exact, opaque `sub` values, or empty string if not used. |
+| `OIDC_ADMISSION_CLAIM` | One signed ID-token claim name, or empty string if not used. |
+| `OIDC_ALLOWED_CLAIM_VALUES` | JSON array of exact string values for that claim, or empty string if not used. |
+| `CREDENTIAL_ENCRYPTION_KEY_ID` | Nonsecret version label for the one active encryption key. Use a new label for each rotation. |
+| `CAPY_TOOL_GROUPS` | Comma-separated group allowlist. Review the checked-in all-groups list against the deployment's needs. |
+| `MCP_ALLOWED_ORIGINS` | Optional exact HTTP(S) client origins, comma-separated without spaces or slashes. Empty denies requests that carry a browser Origin. This is not CORS or an authentication bypass. |
+
+Admission requires an explicit rule. If you set both a subject list and a claim policy, **both must match**. An empty JSON array denies all under that rule. Claim name and allowed values must be configured together; missing, nonstring, or unlisted claims deny admission. Identity is the verified pair `(issuer, sub)`, never email or a display name.
+
+- **Google Workspace:** Register a Web application at Google and add the exact callback to its authorized redirect URIs. For example, set `OIDC_ISSUER` to `https://accounts.google.com`, the admission claim to `hd`, and the claim values to `["workspace.example.invalid"]` (replace the example with an approved Workspace domain). The signed hosted-domain claim is the authority; an email suffix or login screen hint is not.
+- **Microsoft Entra:** Register a Web application for the approved tenant and add the exact callback. Use the tenant-specific v2 issuer `https://login.microsoftonline.com/<tenant-id>/v2.0` rather than `common` or `organizations`; set the admission claim to `tid` and the claim values to `["<tenant-id>"]` with the approved tenant ID. Confirm the registration issues v2 ID tokens with that issuer and claim. Use subjects from this app's tokens when limiting membership further.
+
+The Google and Entra claim shapes are covered by signed fixtures. Neither real registration, tenant, callback nor live IdP has been verified.
+
+## Provision and deploy to the approved target
+
+1. With the approved Cloudflare credentials and target selected, provision a dedicated D1 database and KV namespace. The Wrangler commands are `npx wrangler d1 create <approved-database-name>` and `npx wrangler kv namespace create <approved-namespace-name>`. Use their actual names/IDs for `DB` and `OAUTH_KV`; never point an environment at someone else's resources. Set distinct numeric rate-limit namespace IDs for `AUTH_RATE_LIMITER` (login and public OAuth endpoints) and `ACCOUNT_RATE_LIMITER` (account and consent mutations); review limits against shared-IP traffic. Use separate bindings and secrets per environment. Keep preview URLs off, and configure the approved route or workers.dev hostname to match `PUBLIC_ORIGIN`. A network-reachable Worker is not a private network.
+2. Start with `npm ci`, `npm run check:provider`, and the checks in [CONTRIBUTING.md](../CONTRIBUTING.md). Run `npx wrangler deploy --config <approved-config> --dry-run --outdir dist/worker`, without secrets, to check bundle and binding shape. A dry run doesn't check remote bindings, deployed logs, or login. After reviewing migrations and protecting any existing database, run `npx wrangler d1 migrations list DB --remote --config <approved-config>` and `npx wrangler d1 migrations apply DB --remote --config <approved-config>`, then list again to confirm none are pending. Include the same `--env` everywhere if using a named environment.
+3. Provision the two required secrets in a new `.secrets.production.json` (Git-ignored) or a secure, equivalent file provided by the operator's secret manager. Use a restrictive umask (`077`) and mode `0600`. Enter literal JSON string values, normally escaped for JSON. Do not use dotenv substitution, `vars`, command-line values, shell history, or chat:
+
+   ```json
+   {
+     "OIDC_CLIENT_SECRET": "<registered confidential client secret>",
+     "CREDENTIAL_ENCRYPTION_KEY": "<standard base64 of 32 random bytes>"
+   }
+   ```
+
+   Generate the master key in the approved secret environment and escrow it with its key ID. Valid JSON is parsed literally by Wrangler; dollar expressions in secret values are not expanded or replaced by process environment variables. Do not feed the secrets file into the credential-free checks.
+4. Only with deployment approval, run `npx wrangler deploy --config <approved-config> --secrets-file .secrets.production.json`. Securely remove the working copy when no longer needed; keep the approved secrets in the secret manager. For code-only deployments, use the same approved configuration and existing required secrets. `wrangler secret put` creates **and deploys** a version immediately; stage coordinated changes via the approved version rollout instead of independently changing live fields.
+5. Read back the hostname, resource IDs, required secret names and [observability settings](../SECURITY.md#observability) without dumping values. In a fresh browser and authorized test client, check discovery, an admitted and rejected identity, a read-only grant, one safe read, and account revocation. Check that a new request fails after revoke. Review only sanitized telemetry. Record which real client and provider you actually verified before claiming compatibility.
+
+The former hosted `MCP_AUTH_TOKEN` and deployment-wide `CAPY_API_KEY` are not accepted or used as a fallback. Remove any obsolete hosted bindings via the authorized configuration change, revoke obsolete credentials with their issuers, and have clients reconnect over OAuth. STDIO still uses its own process-local `CAPY_API_KEY`.
+
+## Operate and recover
+
+- **Principal and grants.** Each hosted account supplies one Capy key. Capy sees the principal owning that key, which may be a different person or service user from the OIDC subject. Key validation is a scoped `projects.list` call; validation does not compare identities or grant extra access. Minimize principal roles, project access and spending. `capy:read` allows enabled upstream GET tools; `capy:write` adds non-GET tools only with explicit consent; `offline_access` allows refresh after the browser leaves. The upstream principal and enabled groups still constrain both read and write. The provider defaults to a one-hour access token and a 30-day refresh-token lifetime, with refresh rotation. A browser sign-out does not revoke a client or remove its key.
+- **Offboarding.** Login state expires after 10 minutes; browser sessions last at most one hour. Hosted requests and token exchanges re-evaluate the current admission policy against stored signed identity attributes; they do not poll the IdP. Disabling an IdP account prevents a fresh login once enforced by that IdP, but does not immediately evict an existing local session, and expiry of the browser session does not end an offline OAuth grant. A later signed login that shows claim withdrawal updates the stored admission data; blocked IdP users may never reach that step. For timely offboarding, remove the subject from a configured allowlist (adopt one if a broad claim alone can't exclude the account), revoke the relevant grant locally, or revoke the Capy key with Capy where necessary. Don't rely on IdP disablement or refresh expiry as the immediate cutoff.
+- **Revoke or change a key.** Use `/account` to revoke one client, disconnect all clients, replace the key, or remove it. A committed D1 revocation/version change blocks new authorized calls and refreshes without waiting for OAuth KV cleanup. It cannot retract work already accepted by Capy or undo an in-flight mutation. After a timeout, cancellation, or revoke during a mutation, check the upstream outcome before retrying. Removing a stored key is separate from revoking the key in Capy.
+- **Encrypt and rotate.** D1 stores AES-256-GCM envelopes with fresh nonces and account/version-bound associated data. The running Worker and anyone with the key plus ciphertext can decrypt; this isn't zero-knowledge. One active key is supported; there is no automatic re-encryption. Plan a maintenance window, protect the current database backup and matching key separately, and stop access before switching. Provision the new key and key ID together. Old envelopes no longer decrypt; have users replace their keys in `/account` and reauthorize their clients. Replacement invalidates grants from the old credential version. If the master key is lost, recover the matching approved escrow copy or have users reconnect under a new key; there is no ciphertext recovery without it. If it was exposed, treat stored Capy keys as potentially compromised and rotate or revoke them at Capy as well.
+- **Backups and restoration.** Limit D1 backup access and retention, and keep the matching master key outside database backups in the authorized secret manager. Restrict KV access too: it carries OAuth grant and token material. Never restore a snapshot over live authorization state without reconciling revocations and offboarding since the snapshot. When unsure, provision fresh OAuth KV, invalidate old application grants and sessions before serving traffic, and require fresh sign-in and consent; encrypted keys need either the corresponding key or re-entry. Test restore in an isolated environment. A Worker version rollback doesn't roll back D1/KV and does not safely undo a key rotation or migration by itself.

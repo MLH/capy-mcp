@@ -1,5 +1,7 @@
 import { vi } from "vitest";
 import { hostedEnv } from "./fixtures.js";
+import { signedIdToken, signingJwk } from "./fixtures/oidc-signing.js";
+export { signingKey } from "./fixtures/oidc-signing.js";
 
 export const browserOrigin = "https://mcp.example.invalid";
 export const googleIssuer = "https://accounts.google.com";
@@ -10,13 +12,6 @@ function base64url(bytes: Uint8Array): string {
 }
 
 const encoder = new TextEncoder();
-
-export function signingKey(): Promise<CryptoKeyPair> {
-  return crypto.subtle.generateKey({
-    name: "RSASSA-PKCS1-v1_5", modulusLength: 2048,
-    publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256",
-  }, true, ["sign", "verify"]);
-}
 
 export async function fakeIssuer(keys: CryptoKeyPair, options: {
   issuer?: string;
@@ -45,7 +40,7 @@ export async function fakeIssuer(keys: CryptoKeyPair, options: {
     (issuer === googleIssuer ? "https://oauth2.googleapis.com/token" : `${tenant}/oauth2/v2.0/token`);
   const jwks = options.endpoints?.jwks ??
     (issuer === googleIssuer ? "https://www.googleapis.com/oauth2/v3/certs" : `${tenant}/discovery/v2.0/keys`);
-  const jwk = { ...await crypto.subtle.exportKey("jwk", keys.publicKey), kid: "fixture-key", alg: "RS256", use: "sig" };
+  const jwk = await signingJwk(keys.publicKey);
   const requests: string[] = [];
   const flows = new Map<string, { nonce: string; challenge: string; redirect: string }>();
   let nextCode = 0;
@@ -84,12 +79,8 @@ export async function fakeIssuer(keys: CryptoKeyPair, options: {
       iss: issuer, aud: env.OIDC_CLIENT_ID, sub: "member-1", iat: now, exp: now + 300, nonce: flow.nonce,
       [claimName]: claimValue, email: "same@example.invalid", ...options.claims,
     };
-    const message = [JSON.stringify({ alg: "RS256", kid: jwk.kid }), JSON.stringify(claims)]
-      .map((part) => base64url(encoder.encode(part))).join(".");
-    const signature = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", keys.privateKey, encoder.encode(message)));
-    if (options.corruptSignature) signature[0] ^= 1;
     return Response.json({
-      id_token: `${message}.${base64url(signature)}`, token_type: "Bearer",
+      id_token: await signedIdToken(keys.privateKey, claims, options.corruptSignature), token_type: "Bearer",
       access_token: "fixture-access-token", refresh_token: "fixture-refresh-token",
     });
   });

@@ -1,0 +1,52 @@
+# Task 5 — hosted browser proof, operator runbook and verification
+
+Base: `f342818c5445db2966cf022b5e9d3e6d52a23735`. Shared checkout: `/workspace/capy-mcp`. Controller owns independent final review, push, PR #1, and media upload/attachment. No push, PR mutation, deployment, remote resource writes, license selection, or publication performed here.
+
+## Browser and visual evidence
+
+`npm run test:browser-consent` bundles the production entry point and then drives real Chrome 157.0.8103.78 against Miniflare/workerd, in-memory D1/KV, and local versions of both rate-limit bindings at fixture limits. It creates a fresh database and applies every committed migration. No fixture seeds an account, credential, session or token. Chromium sees a distinct local HTTPS fake issuer under a reserved DNS name mapped to loopback; signed ID-token, discovery, JWKS, and fake Capy traffic are satisfied only in the test runner. The shared fixture signer also drives workerd identity tests. TLS ignore and temporary keypairs are confined to the isolated browser fixture.
+
+1. The application sign-in page sends the browser to the local issuer. The rejected identity has the right signed claim and an unlisted subject; the browser sees the generic error and D1 still has zero accounts.
+2. Starting at the DCR client's authorization request, the admitted identity signs in with real browser cookies, signed claims, S256 PKCE, nonce, and a one-use issuer code; the issuer verifies the exact callback and client secret. Both sign-in flows exchange an ID token and read JWKS.
+3. The browser enters a throwaway key on the actual connect page. The Worker validates it against the fixture Capy endpoint and resumes to the real consent form. Consent shows the client and redirect destination; write is unchecked. The MCP client follows the OAuth callback, exchanges a separate code with its verifier, receives read and offline scopes without write, and calls an actual tool that reaches fake Capy with the delegated key.
+4. The browser opens account, confirms an individual revoke, and verifies the resulting account has no authorized clients. The access token then returns HTTP 401, refresh returns HTTP 400, and fake Capy call count is unchanged. The prior localhost and IPv6 allow/deny regressions still verify no callback request carries a referrer or cookie. A real guarded account disconnect updates D1 authorization epoch and a redirected CIMD fixture is refused.
+
+After building the Worker, ran `HOSTED_SCREENSHOT_DIR=docs/images/hosted-oidc npx tsx tests/hosted/browser-consent.mjs` to capture page content only, with no address bar, callback query, cookies, headers, or populated key input. The consent image also masks the unsigned fixture callback URL, after checking the actual rendered destination. Every final PNG was visually inspected; each has no PNG metadata keys and shows only sample data.
+
+- `docs/images/hosted-oidc/01-sign-in.png`
+- `docs/images/hosted-oidc/02-sign-in-error.png`
+- `docs/images/hosted-oidc/03-connect-key.png`
+- `docs/images/hosted-oidc/04-consent.png`
+- `docs/images/hosted-oidc/05-account.png`
+- `docs/images/hosted-oidc/06-revoke.png`
+- `docs/images/hosted-oidc/07-revoked.png`
+
+## Security and observability
+
+- TDD RED: focused `npm run test:worker -- tests/hosted/oauth.test.ts -t 'metadata provider exception|limiter throws'` reproduced client-controlled metadata URL and raw exception text in the generated provider's console warning. The initial limiter assertion wrongly assumed empty KV after the preceding test's registration; compare counts before/after instead. GREEN: `npm run prepare && npm run test:worker -- tests/hosted/oauth.test.ts -t 'metadata provider exception|limiter throws|authority store fails|issuance fails'` passed all four. It verifies fixed warning text/no sentinel, no exception leakage, no grant or token upon dependency failure, no registration after limiter rejection, and retained consent-clearing behavior on D1 failure. Existing suites also recheck D1/KV authority when stale KV grants remain and browser/key validation error redaction.
+- Provider remains pinned to 1.3.0, with unchanged installed version and JS/type source SHA-256 checks and exact-once patch anchors. Source hashes: JS `2d9d86d20e5de2bd86d061287d2dfd5b5f891b4f0f2687cda0fd7bce6cb91fff`; types `efbc9b828476a2634cf7694654d5fba038d64400736aa6e934df5fe3e00d6cdb`. Generated runtime SHA-256 `1373ca89349fe01ee3427a4eec3434885be6e9fa8ad8c4edef8e3424c7f16e72`; generated types unchanged by this patch. Diagnostics emit fixed messages (and numeric status only in the library default hook, which the app does not use). Direct logging from CIMD failure/fallback, grant cleanup and client renewal no longer emits URLs, identifiers or raw exceptions. Reviewed application catches, MCP errors, OIDC library errors, provider direct logs and the provider hook; no raw request/body/cookies, headers, token values, Capy keys or upstream exceptions need logging.
+- [Cloudflare automatic span attributes](https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/) include fetch handler `url.full`/`url.path`, subrequest URL/query and selected headers/body sizes (not Cookie, Authorization or raw form body), Cache request URL, and KV key/metadata. The provider includes attacker-controlled segments from invalid bearer input in some KV lookups, stores client/resource/redirect metadata on grant KV writes, and uses the user-supplied CIMD URL for direct fetch and Cache. Query-only redaction does not cover those other attributes. The pinned Wrangler schema offers trace enabled/sampling/persist/destinations, without field filtering; documented [native custom spans](https://developers.cloudflare.com/workers/observability/traces/custom-spans/) require the same tracing switch and coexist with automatic spans. Even a collector that drops fields receives them first. Live access logs, tails and exports are distinct risks and are not exercised locally.
+- Controller ruling on 2026-11-23: retain fixed application logs, query redaction, and ordinary aggregate metrics; explicitly disable invocation logs, native automatic traces and Logpush. This is an implementation exception to the original trace-enabled intent, now recorded in the design spec and Security docs. Operators must verify fake probes before onboarding and must not enable tracing, tails or exports until unsafe fields can be excluded before collection/export. No remote observability setting changed. The new normalized-Wrangler-config regression failed with automatic traces enabled (negative control); the final config explicitly turns them off while retaining logging and redaction.
+
+## Verification
+
+Credential/deployment environment bindings explicitly unset; Wrangler metrics disabled. Local runs are equivalent to the two GitHub matrix legs, not GitHub CI results for unpushed commits. Both use the committed lockfile.
+
+| Command | Evidence |
+| --- | --- |
+| `npm ci`, `npm run check:provider` | Locked install plus root prepare generated and verified the same reviewed hosted provider; no unpatched fallback. |
+| `npm run generate:check` | 102 tools and validators, six documented exclusions, no drift. |
+| `npm run types:worker:check`, `npm run typecheck` | Binding declaration current; Node and Worker TS checks pass. |
+| `npm test` | Final Node 24.22.1 and Node 22.23.5 reruns each passed 164 Node and 243 workerd tests, including the telemetry guard and 12 production STDIO child-process tests. |
+| `npx wrangler d1 migrations apply DB --local --persist-to <fresh-temp-dir>` then `npx wrangler d1 migrations list DB --local --persist-to <same-dir>` | All four migrations applied; no pending migrations. No remote database accessed. |
+| `npm run test:browser-consent` | Credential-free Worker dry run and full browser checks above. Wrangler 4.163.0 bundled 1909.19 KiB / 285.51 KiB gzip; output only to ignored `dist/worker`. |
+| `npm pack --dry-run`, `npm run check:artifacts` | Actual tarball and dry-run contain only README, package manifest and executable CLI. Extracted CLI initializes from a temporary directory without node_modules; bundle lacks Workers/OIDC imports. Worker output/source map have no test fixtures or local secret file references; no configured secret inputs went into either artifact. |
+| `npm audit --audit-level=high`, `git diff --check` | Zero known vulnerabilities at verification time; no whitespace errors. |
+
+Known warnings remain visible: Wrangler's required-secret warning before test-only bindings merge, missing upstream sourcemap sources for openid-client/oauth4webapi, and npm 11 notice about the esbuild/workerd install scripts in the pinned dependency set. No blanket suppression or version bump. The expected rejected CIMD case prints the new fixed warning. An initial Node 22 shell wrapped the whole matrix in `npx -c`; npm's inherited exec options collided with nested `npx wrangler`. The successful full rerun added the resolved Node 22 binary directory to PATH for a normal shell; GitHub uses setup-node directly.
+
+## Self-review and deployment boundary
+
+The browser harness has no production runtime fixture, alternate auth, seeded session, or fake Capy configuration. It drove the existing reviewed browser routes; no production flow fix was needed. Provider changes are limited to logging sites, with unchanged source provenance and no protocol or authorization change. The runbook separates local STDIO and hosted OAuth, shows Google Workspace and tenant-specific Entra placeholders only, documents operational recovery, and distinguishes D1 authority from eventual KV cleanup. CI repeats credential-free checks, and screenshot output is opt-in. No hosted settings or credentials were supplied.
+
+Verified: local workerd and Miniflare D1/KV/rate limits, synthetic Google/Entra claim shape verification, signed test IdP and browser forms, fake Capy, a fixture OAuth client, local STDIO protocol and package artifact. **Not verified:** deployment, live Cloudflare metrics/logs/traces or edge storage behavior, real Google or Entra registrations/login, real Capy activity/billing, any real MCP client, or external artifact publication. The next deployment-only inputs are the operator-approved Cloudflare target/origin and registration, plus secure provisioning of the registered OIDC secret and the operator-generated master key. Do not request values in chat.

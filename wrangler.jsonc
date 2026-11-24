@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": true,
   "preview_urls": false,
+  "logpush": false,
   "secrets": { "required": ["OIDC_CLIENT_SECRET", "CREDENTIAL_ENCRYPTION_KEY"] },
   "vars": {
     "CAPY_TOOL_GROUPS": "attachments,automations,captains,files,folders,issues,messages,projects,reviewFilters,reviewRules,reviews,subagents,threads,usage,users",
@@ -28,6 +29,6 @@
     "enabled": true,
     "redact_query_string": true,
     "logs": { "enabled": true, "invocation_logs": false },
-    "traces": { "enabled": true }
+    "traces": { "enabled": false }
   }
 }

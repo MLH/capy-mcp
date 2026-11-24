@@ -25,14 +25,12 @@ STDIO exchanges MCP protocol messages on stdin/stdout, not an interactive prompt
 
 A Capy key acts as its configured human or service-user principal in one organization, with that principal's live permissions and project access. It does not grant extra authority or per-key scopes. Obtain keys through Capy's **Settings → API**. For unattended use, prefer a service user with the narrowest role/project access and a monthly spend cap. See [Capy authentication](https://docs.capy.ai/api-reference/authentication).
 
-| Variable | STDIO | Worker | Meaning |
-| --- | --- | --- | --- |
-| `CAPY_API_KEY` | Required environment secret | Required Worker secret | Upstream Capy bearer credential. |
-| `CAPY_TOOL_GROUPS` | Optional environment value | Wrangler `vars` | Comma-separated, case-sensitive group allowlist. Unset enables all 102 tools; empty or unknown groups fail closed. |
-| `MCP_AUTH_TOKEN` | Not used | Required Worker secret | Separate bearer credential for MCP clients; must differ from the Capy key. |
-| `MCP_ALLOWED_ORIGINS` | Not used | Wrangler `vars` | Comma-separated exact HTTP(S) origins, with no paths, trailing slashes, or whitespace. Empty permits no browser origins. |
+| Variable | Where | Meaning |
+| --- | --- | --- |
+| `CAPY_API_KEY` | STDIO process environment | Required upstream key for the local CLI. Hosted users submit their own key over HTTPS after signing in. |
+| `CAPY_TOOL_GROUPS` | STDIO environment or Worker `vars` | Optional comma-separated, case-sensitive group allowlist. Unset enables all 102 tools; empty or unknown groups fail closed. |
 
-Both secrets must be nonempty printable ASCII without spaces. Use a long cryptographically random MCP token, generated independently from the Capy key, and store it securely. Clients cannot pass a Capy key or arbitrary request headers through tool arguments. The incoming MCP bearer is never used as the upstream API key.
+Clients cannot pass a key or arbitrary request headers through tool arguments. Hosted OAuth tokens authenticate to this Worker and are never sent upstream as Capy keys. The former hosted `MCP_AUTH_TOKEN` and shared `CAPY_API_KEY` mode is removed.
 
 Supported groups are:
 
@@ -48,79 +46,30 @@ captains,issues,messages,threads,projects,users
 
 For STDIO, set that same value in the environment. Filtering applies to both discovery and direct calls, but isn't a substitute for principal permissions. **The all-groups default includes sensitive mutations, including project environment-variable writes.** Even the focused example includes `projects`, so it is not read-only. Tool annotations are guidance, not authorization or a spending safeguard.
 
-## Worker development and deployment
+## Hosted Worker
 
-The Worker serves only `/mcp`, using stateless Streamable HTTP with finite JSON responses and no persistent sessions. Authenticated `POST` is supported; after authentication and Origin checks, `GET`, `HEAD`, and `DELETE` return 405. Requests without an `Origin` header can proceed after authentication. A request with an Origin must match `MCP_ALLOWED_ORIGINS` exactly; no permissive CORS is supplied.
+The Worker exposes a stateless Streamable HTTP MCP resource at `<PUBLIC_ORIGIN>/mcp`, OAuth discovery and client authorization, and a browser account page. There is no legacy SSE transport or persistent MCP session. MCP uses authenticated POST with finite JSON responses; after authentication and exact Origin checks, GET, HEAD, and DELETE return 405. A missing Origin is allowed for non-browser clients. An allowlisted Origin does not provide browser CORS support.
 
-The `2026-11-04` compatibility date explicitly enables `enable_request_signal` so an active HTTP request's abort/disconnect cancels its upstream I/O. Each HTTP request owns its server and transport: a separate cancellation-notification POST cannot cancel a previous request. Cancel the active HTTP request instead. STDIO supports MCP cancellation on its existing connection. Cancellation stops outstanding I/O, but cannot undo a mutation already accepted upstream or guarantee delivery of a result to a disconnected client.
+Each account signs in through the operator's configured OIDC issuer and admission policy. The Worker keeps one encrypted Capy key per account and approves each client separately. `capy:read` allows enabled GET tools; `capy:write` requires explicit approval and adds enabled mutation tools; `offline_access` gives the client refresh capability. The Capy key's principal determines actual upstream authority. In `/account`, revoke one client, disconnect all clients, replace or remove your key, or sign out. Sign-out only ends the browser session. Revocation blocks new calls without waiting for KV propagation; it cannot undo work already in flight.
 
-For local development, put `CAPY_API_KEY` and `MCP_AUTH_TOKEN` in a private `.dev.vars` file beside `wrangler.jsonc`, using dotenv syntax. These files are ignored by Git. Do not put secrets in Wrangler `vars`, source files, shell history, or example configuration. Local calls still contact the real Capy API and can incur costs.
+Active HTTP aborts stop outstanding upstream I/O. Each request owns its MCP transport, so a separate cancellation-notification POST does not cancel another request. STDIO supports cancellation on its existing connection. An aborted mutation may already have taken effect; check its outcome before retrying.
 
-```sh
-npx wrangler dev --local --ip 127.0.0.1 --port 8787
-```
-
-The local endpoint is `http://127.0.0.1:8787/mcp`. Validate bundling without uploading or deploying:
-
-```sh
-npm run worker:check
-```
-
-The dry-run writes to ignored `dist/worker`. It needs no Cloudflare account or deployment credentials and does not prove secrets are provisioned or a deployed endpoint works.
-
-### Authorized deployment only
-
-The following commands change Cloudflare resources. They are instructions for an operator, not part of tests or CI. First choose the account and Worker name in `wrangler.jsonc`, authenticate Wrangler, review principal/group access, and arrange secure secret storage.
-
-For the first deployment, create a new `.secrets.production.json` beside `wrangler.jsonc` under a restrictive umask (`077`), and keep its file permissions at `0600`. This exact path is Git-ignored. Using a secure editor, replace both placeholders with the independently chosen secret values:
-
-```json
-{
-  "CAPY_API_KEY": "<chosen-capy-api-key>",
-  "MCP_AUTH_TOKEN": "<independently-chosen-mcp-token>"
-}
-```
-
-Use valid JSON with string values and normal JSON escaping for quotes/backslashes. Wrangler parses valid JSON secrets literally: dollar references are not expanded and same-name process environment variables do not replace the chosen values. Do not substitute a dotenv secrets file here; its expansion and process-environment precedence can silently select a different Capy principal or MCP token. Then upload code and secrets together:
-
-```sh
-npx wrangler login
-npx wrangler deploy --secrets-file .secrets.production.json
-```
-
-Keep that file out of artifacts and backups that aren't approved for secrets; remove it securely when no longer needed. For later interactive secret rotation on the existing Worker, Wrangler prompts for values:
-
-```sh
-npx wrangler secret put CAPY_API_KEY
-npx wrangler secret put MCP_AUTH_TOKEN
-```
-
-**Each `secret put` immediately creates and deploys a Worker version.** Coordinate MCP token rotation with clients. Both secrets remain required in the production config. For subsequent code deployment with already-provisioned secrets:
-
-```sh
-npx wrangler deploy
-```
-
-`workers_dev: true` makes the deployed Worker network-reachable at the workers.dev URL printed by Wrangler; append `/mcp`. Access is token-protected, not a private network. `preview_urls: false` disables preview URLs. Never remove authentication to make a client connect. Logs and traces are enabled, automatic invocation logs are disabled, and URL query strings are redacted. The application does not log payloads or credentials; review any additional platform logging before enabling it.
+Use the [operator runbook](docs/hosted-deployment.md) to register an OIDC app, configure admission, provision secrets and storage, and deploy to an approved target. To run a credential-free local walkthrough with a signed fake IdP, fake Capy, local D1/KV, and Chromium, see [development checks](CONTRIBUTING.md#development).
 
 ## Connect an MCP client
 
-Choose the transport your client supports. The connection details are the same whether you use Duet, Dot, Hermes, or another client; configuration syntax and transport support depend on the client. Duet and Dot have not been tested with this server.
+### Hosted Streamable HTTP with OAuth
 
-| Mode | Connection details |
-| --- | --- |
-| Local STDIO | Launch `node` with `/absolute/path/to/capy-mcp/dist/stdio.js` as its argument. Supply `CAPY_API_KEY` and optionally `CAPY_TOOL_GROUPS` in the server process environment. |
-| Remote Streamable HTTP | Use your deployed Worker's `/mcp` URL and an `Authorization: Bearer <MCP_AUTH_TOKEN>` header. Keep `CAPY_API_KEY` on the Worker, not in the client. |
+1. In the client, add a Streamable HTTP MCP server using the operator's canonical `https://<host>/mcp` URL. Do not configure a static Authorization header or paste a Capy key into the client's server config.
+2. Start OAuth in the client. It must discover the protected resource and authorization server, register a redirect via DCR or a supported Client ID Metadata Document, and use authorization-code flow with S256 PKCE and the exact MCP resource indicator. The client stores and sends the OAuth tokens, not your Capy key.
+3. In your browser, sign in with the configured IdP. Check the deployment's HTTPS origin before supplying your Capy key. Inspect the requesting client and redirect destination before approving. Leave write unchecked unless you intend to delegate mutations.
+4. Return to the client. Manage or revoke the grant at `https://<host>/account`. If a key is replaced, you'll need to authorize the client again.
 
-The remote endpoint supports POST only, not legacy SSE or OAuth. If your client requires a GET/HEAD preflight, configure it to skip that probe where supported. Keep its write-tool approval controls enabled; client approval is not a substitute for the server's access controls. The server exposes tools, not MCP resources or prompts. No live client session has been verified.
+This server implements MCP tools, not MCP resources or prompts. Local tests exercise a fixture OAuth client and fake IdP; Duet, Dot, ChatGPT, Hermes and other real hosted clients have not been verified.
 
-### Example: Hermes
+### Local STDIO example: Hermes
 
-These YAML entries follow the [current official Hermes MCP config reference](https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference), read on 2026-11-04. Add **one** entry under `mcp_servers` in your Hermes `config.yaml`. Put secrets in the active Hermes profile's secret scope (normally `~/.hermes/.env`) or process environment; `${env:...}` references keep them out of YAML. Configuration syntax was checked against the docs, but no live Hermes session has been verified.
-
-#### Local STDIO
-
-Build first and replace the absolute path. Hermes launches Node itself:
+Build first and replace the absolute path below. Configure the process environment through Hermes's active secret scope or your secret manager. This example follows the [Hermes MCP config reference](https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference); no live Hermes session has been verified.
 
 ```yaml
 mcp_servers:
@@ -134,22 +83,7 @@ mcp_servers:
     trust: untrusted
 ```
 
-#### Remote Worker
-
-Replace the example host with the authorized deployment's host. Hermes uses Streamable HTTP by default; don't set `transport: sse` or `auth: oauth` for this server.
-
-```yaml
-mcp_servers:
-  capy:
-    url: "https://capy-mcp.example.workers.dev/mcp"
-    headers:
-      Authorization: "Bearer ${env:MCP_AUTH_TOKEN}"
-    skip_preflight: true
-    timeout: 60
-    trust: untrusted
-```
-
-`skip_preflight` bypasses Hermes' HEAD/GET content-type probe because this POST-only endpoint returns a plain-text 405 for those methods. It does not bypass TLS, bearer authentication, or Origin validation. Do not send `CAPY_API_KEY` to the MCP endpoint: it lives only on the Worker. Hermes' `trust: untrusted` requests approval for write-capable tools under its normal approval policy; it is not a server-side permission boundary. The server implements tools only, not MCP resources or prompts.
+Keep client approvals enabled for write-capable tools. Client approvals do not replace server-side scopes or Capy permissions.
 
 ## Tool call examples
 
@@ -222,21 +156,8 @@ The pinned [OpenAPI contract](api/openapi.json), with [source/date/SHA-256 metad
 | `streams.subagent` | Continuous SSE; use `capy_subagents_get` and paginated `capy_subagents_messages`. |
 | `streams.task` | Legacy continuous SSE; use the corresponding subagent JSON tools. |
 
-There is no OAuth server, multi-user credential store, legacy SSE transport, polling daemon, or arbitrary HTTP proxy.
+There is no legacy SSE transport, polling daemon, or arbitrary HTTP proxy.
 
 ## Checks and contributing
 
-```sh
-npm run generate:check
-npm run typecheck
-npm test
-npm run worker:check
-npm pack --dry-run
-git diff --check
-```
-
-`npm test` builds the production CLI, runs Node tests, and runs the workerd suite via `npm run test:worker` (singular); there's no need to build or run Worker tests twice. CI runs these checks on Node 22 and 24 with no deployment credentials. `npm pack --dry-run` inspects the package without publishing it. Its CLI bundle includes the catalog and standalone validators; Worker bundles, local secrets, and development source aren't package artifacts.
-
-Worker tests intentionally provide fake Miniflare secrets. Wrangler currently warns that required secrets are missing **before** the plugin merges those test bindings. That known warning does not mean authentication tests are skipped. Production secrets remain required; don't disable them or blanket-suppress warnings to silence it.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contract refresh and checks, and [SECURITY.md](SECURITY.md) for boundaries and reporting. No live Capy/Hermes session or Cloudflare deployment was verified as part of local acceptance.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete credential-free checks, fixture browser walkthrough, and contract refresh. CI runs the same checks on Node 22 and 24. See [SECURITY.md](SECURITY.md) for trust boundaries, observability, and reporting. The npm package contains the standalone CLI, manifest and this README only; it does not contain the Worker, fixture media or secrets. No live connection or deployment was verified as part of local acceptance.
