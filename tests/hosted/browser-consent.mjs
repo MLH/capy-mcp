@@ -105,8 +105,9 @@ try {
   const tab = await openBrowserTab(chrome);
   const desktopWidth = 940;
   const mobileWidth = 375;
+  const narrowMobileWidth = 320;
   async function viewport(width) {
-    await tab("Emulation.setDeviceMetricsOverride", { width, height: 850, deviceScaleFactor: 1, mobile: width === mobileWidth });
+    await tab("Emulation.setDeviceMetricsOverride", { width, height: 850, deviceScaleFactor: 1, mobile: width <= mobileWidth });
   }
   await viewport(desktopWidth);
   async function evaluate(expression) {
@@ -137,12 +138,17 @@ try {
       const body = getComputedStyle(document.body);
       const primary = document.querySelector(${JSON.stringify(primary)});
       const elements = ${JSON.stringify(controls)}.map(selector => document.querySelector(selector));
-      const visible = elements.every(element => {
-        if (!element?.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+      const blockedControls = elements.flatMap((element, index) => {
+        if (!element?.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return [{ index, fragments: [] }];
         element.scrollIntoView({ block: 'center' });
-        const { left, top, right, bottom, width, height } = element.getBoundingClientRect();
-        return width > 0 && height > 0 && left >= 0 && right <= innerWidth && top >= 0 && bottom <= innerHeight &&
-          element.contains(document.elementFromPoint(left + width / 2, top + height / 2));
+        const fragments = [...element.getClientRects()]
+          .filter(({ width, height }) => width > 0 && height > 0)
+          .map(({ left, top, right, bottom, width, height }) => ({
+            rect: [left, top, right, bottom],
+            inViewport: left >= 0 && right <= innerWidth && top >= 0 && bottom <= innerHeight,
+            hit: element.contains(document.elementFromPoint(left + width / 2, top + height / 2)),
+          }));
+        return fragments.length && fragments.every(({ inViewport, hit }) => inViewport && hit) ? [] : [{ index, fragments }];
       });
       const dynamic = [...main.querySelectorAll('bdi, p > code')];
       const text = dynamic.map(node => node.textContent);
@@ -154,7 +160,7 @@ try {
             main.scrollWidth === main.clientWidth,
           styled: body.backgroundImage.includes('linear-gradient') && getComputedStyle(main).backgroundColor === 'rgb(255, 255, 255)' &&
             getComputedStyle(primary).backgroundColor === 'rgb(248, 185, 42)',
-          visible,
+          blockedControls,
         };
       } finally {
         dynamic.forEach((node, i) => { node.textContent = text[i]; });
@@ -164,7 +170,7 @@ try {
         main.removeAttribute('tabindex');
       }
     })()`);
-    assert.deepEqual(visual, { viewport: width, noOverflow: true, styled: true, visible: true }, "Hosted paint, controls and long text must fit the viewport");
+    assert.deepEqual(visual, { viewport: width, noOverflow: true, styled: true, blockedControls: [] }, "Hosted paint, controls and long text must fit the viewport");
     await tab("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
     await tab("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
     assert.equal(await evaluate(`(() => {
@@ -207,6 +213,7 @@ try {
     await capture(name);
     await verifyLayout(mobileWidth, primary, firstControl, controls);
     await capture(name, "mobile");
+    await verifyLayout(narrowMobileWidth, primary, firstControl, controls);
     await viewport(desktopWidth);
   }
   async function callback(flow, decision) {
