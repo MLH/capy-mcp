@@ -31,6 +31,8 @@ export interface AppGrant {
   revokedAt: number | null;
 }
 
+export type AccountClient = Pick<AppGrant, "id" | "scopes"> & { label: string; createdAt: number | null };
+
 export interface BrowserSession {
   accountId: string;
   csrfHash: string;
@@ -139,18 +141,38 @@ export function createStore(db: D1Database) {
       return deleted.meta.changes === 1;
     },
 
-    async createGrant(record: AppGrant, expectedCredentialVersion: number, expectedEpoch: number): Promise<boolean> {
+    async createGrant(record: AppGrant, expectedCredentialVersion: number, expectedEpoch: number, clientLabel?: string): Promise<boolean> {
       if (record.credentialVersion !== expectedCredentialVersion ||
           record.authorizationEpoch !== expectedEpoch || record.revokedAt !== null) return false;
+      const label = clientLabel?.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 256) || null;
       const result = await db.prepare(`
-        INSERT INTO app_grants (id, account_id, provider_grant_id, client_id, scopes, credential_version, authorization_epoch)
-        SELECT ?, accounts.id, ?, ?, ?, accounts.credential_version, accounts.authorization_epoch
+        INSERT INTO app_grants (id, account_id, provider_grant_id, client_id, scopes, credential_version, authorization_epoch, created_at, client_label)
+        SELECT ?, accounts.id, ?, ?, ?, accounts.credential_version, accounts.authorization_epoch, ${databaseTimeMs}, ?
         FROM accounts
         JOIN credentials ON credentials.account_id = accounts.id AND credentials.version = accounts.credential_version
         WHERE accounts.id = ? AND accounts.credential_version = ? AND accounts.authorization_epoch = ?
-      `).bind(record.id, record.providerGrantId, record.clientId, JSON.stringify(record.scopes),
+      `).bind(record.id, record.providerGrantId, record.clientId, JSON.stringify(record.scopes), label,
         record.accountId, expectedCredentialVersion, expectedEpoch).run();
       return result.meta.changes === 1;
+    },
+
+    async getAccountConnection(accountId: string): Promise<{ connected: boolean; clients: AccountClient[] }> {
+      type ConnectionRow = { connected: number; id: string | null; label: string | null; scopes: string | null; createdAt: number | null };
+      const { results } = await primary(`
+        SELECT credentials.account_id IS NOT NULL AS connected, app_grants.id, COALESCE(app_grants.client_label, app_grants.client_id) AS label,
+          app_grants.scopes, app_grants.created_at AS createdAt
+        FROM accounts
+        LEFT JOIN credentials ON credentials.account_id = accounts.id AND credentials.version = accounts.credential_version
+        LEFT JOIN app_grants ON app_grants.account_id = credentials.account_id
+          AND app_grants.credential_version = credentials.version AND app_grants.authorization_epoch = accounts.authorization_epoch
+          AND app_grants.revoked_at IS NULL
+        WHERE accounts.id = ? ORDER BY app_grants.created_at DESC, app_grants.id
+      `).bind(accountId).all<ConnectionRow>();
+      const clients: AccountClient[] = [];
+      for (const { id, label, scopes, createdAt } of results) {
+        if (id !== null && label !== null && scopes !== null) clients.push({ id, label, scopes: JSON.parse(scopes), createdAt });
+      }
+      return { connected: results[0]?.connected === 1, clients };
     },
 
     async getAuthorizedCredential(accountId: string, grantId: string, version: number, epoch: number):

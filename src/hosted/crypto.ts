@@ -21,7 +21,7 @@ export function decodeBase64(value: string, maxBytes: number): Uint8Array<ArrayB
   return bytes;
 }
 
-function credentialFormat(key: string): boolean {
+export function isCredentialKey(key: string): boolean {
   return key.length <= MAX_CREDENTIAL_BYTES && /^[\x21-\x7e]+$/.test(key);
 }
 
@@ -38,7 +38,7 @@ function credentialCipher(
 }
 
 export async function encryptCredential(key: string, accountId: string, version: number, config: EncryptionConfig): Promise<CredentialEnvelope> {
-  if (!credentialFormat(key)) throw new Error("Invalid credential");
+  if (!isCredentialKey(key)) throw new Error("Invalid credential");
   try {
     const nonce = crypto.getRandomValues(new Uint8Array(nonceBytes));
     const cipher = credentialCipher(accountId, version, config, nonce, "encrypt");
@@ -57,7 +57,7 @@ export async function decryptCredential(envelope: CredentialEnvelope, accountId:
     const cipher = credentialCipher(accountId, envelope.version, config, nonce, "decrypt");
     const plaintext = await crypto.subtle.decrypt(cipher.algorithm, await cipher.key, ciphertext);
     const key = new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
-    if (!credentialFormat(key)) throw new Error("Invalid credential envelope");
+    if (!isCredentialKey(key)) throw new Error("Invalid credential envelope");
     return key;
   } catch {
     throw new Error("Invalid credential envelope");
