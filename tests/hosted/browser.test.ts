@@ -79,7 +79,7 @@ describe("browser-bound OIDC sign-in", () => {
     const authorization = new URL(start.headers.get("Location") ?? "");
     expect(authorization.origin + authorization.pathname).toBe(provider.authorization);
     expect(authorization.searchParams.get("response_type")).toBe("code");
-    expect(authorization.searchParams.get("scope")).toBe("openid");
+    expect(authorization.searchParams.get("scope")).toBe(issuer === entraIssuer ? "openid" : "openid email");
     expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorization.searchParams.get("redirect_uri")).toBe(`${browserOrigin}/auth/callback`);
     expect(authorization.searchParams.has("client_secret")).toBe(false);

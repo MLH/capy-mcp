@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { beginLogin, finishLogin } from "../../src/hosted/browser.js";
-import { browserOrigin, entraIssuer, fakeIssuer, signingKey } from "./fake-issuer.js";
+import { browserOrigin, entraIssuer, fakeIssuer, googleIssuer, signingKey } from "./fake-issuer.js";
 import { resetHostedDb } from "./setup.js";
 
 let keys: CryptoKeyPair;
@@ -9,6 +9,18 @@ beforeEach(resetHostedDb);
 afterEach(() => vi.unstubAllGlobals());
 
 const login = () => new Request(`${browserOrigin}/login`);
+
+it.each([
+  [googleIssuer, "openid email"],
+  [entraIssuer, "openid"],
+  ["https://issuer.example.invalid/region", "openid"],
+])("requests only the identity scopes required by %s", async (issuerUrl, scope) => {
+  const issuer = await fakeIssuer(keys, { issuer: issuerUrl });
+  const response = await beginLogin(login(), issuer.env, { kind: "account" });
+  expect(response.status).toBe(303);
+  const authorization = new URL(response.headers.get("Location") ?? "");
+  expect(authorization.searchParams.get("scope")).toBe(scope);
+});
 
 it.each([
   ["metadata for a different tenant", { issuer: "https://login.microsoftonline.com/other-tenant/v2.0" }],

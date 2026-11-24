@@ -78,7 +78,7 @@ export async function authorizationStart(config: HostedConfig, signal: AbortSign
   const redirect = client.buildAuthorizationUrl(oidc, {
     response_type: "code",
     redirect_uri: config.publicOrigin + OIDC_CALLBACK_PATH,
-    scope: "openid",
+    scope: config.issuer === "https://accounts.google.com" ? "openid email" : "openid",
     state,
     nonce,
     code_challenge_method: "S256",
