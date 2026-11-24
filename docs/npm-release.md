@@ -30,6 +30,8 @@ The workflow must exist on the repository's default branch first. npm requires a
 
 The repository must be public for the workflow's required provenance generation. Trusted publishing authenticates CI; provenance links the artifact to its source and workflow, not to a security audit. No visibility change is part of running this workflow.
 
+Preserve the exact GitHub owner and repository casing in both the trusted publisher and the package's `repository.url`: this repository is `MLH/capy-mcp`, not `mlh/capy-mcp`. GitHub accepts both URL spellings, but npm provenance verification rejects the lowercase owner. The artifact check verifies the canonical repository identity before staging.
+
 ## Stage and approve a release
 
 1. Update the package and lockfile version in a reviewed PR. Never reuse a version that is published or already staged. Merge only with a maintainer's approval.

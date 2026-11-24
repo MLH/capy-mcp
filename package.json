@@ -9,11 +9,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mlh/capy-mcp.git"
+    "url": "git+https://github.com/MLH/capy-mcp.git"
   },
-  "homepage": "https://github.com/mlh/capy-mcp#readme",
+  "homepage": "https://github.com/MLH/capy-mcp#readme",
   "bugs": {
-    "url": "https://github.com/mlh/capy-mcp/issues"
+    "url": "https://github.com/MLH/capy-mcp/issues"
   },
   "type": "module",
   "bin": {
