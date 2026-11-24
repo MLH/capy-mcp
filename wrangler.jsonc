@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "capy-mcp",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-23",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "logpush": false,
+  "secrets": { "required": ["OIDC_CLIENT_SECRET", "CREDENTIAL_ENCRYPTION_KEY"] },
+  "vars": {
+    "CAPY_TOOL_GROUPS": "attachments,automations,captains,files,folders,issues,messages,projects,reviewFilters,reviewRules,reviews,subagents,threads,usage,users",
+    "MCP_ALLOWED_ORIGINS": "",
+    "PUBLIC_ORIGIN": "https://mcp.example.invalid",
+    "OIDC_ISSUER": "https://id.example.invalid",
+    "OIDC_CLIENT_ID": "",
+    "OIDC_ALLOWED_SUBJECTS": "",
+    "OIDC_ADMISSION_CLAIM": "",
+    "OIDC_ALLOWED_CLAIM_VALUES": "",
+    "CREDENTIAL_ENCRYPTION_KEY_ID": "v1"
+  },
+  "d1_databases": [{ "binding": "DB", "database_name": "capy-mcp-local", "database_id": "00000000-0000-4000-8000-000000000001", "migrations_dir": "migrations", "remote": false }],
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "00000000000000000000000000000001", "remote": false }],
+  "ratelimits": [
+    { "name": "AUTH_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
+    { "name": "ACCOUNT_RATE_LIMITER", "namespace_id": "1002", "simple": { "limit": 5, "period": 60 } }
+  ],
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  }
+}

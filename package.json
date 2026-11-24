@@ -1,0 +1,54 @@
+{
+  "name": "capy-mcp",
+  "version": "0.0.0",
+  "description": "Schema-validated Capy API tools over local STDIO and authenticated Workers MCP HTTP",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mlh/capy-mcp.git"
+  },
+  "homepage": "https://github.com/mlh/capy-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/mlh/capy-mcp/issues"
+  },
+  "type": "module",
+  "bin": {
+    "capy-mcp": "dist/stdio.js"
+  },
+  "files": ["dist/stdio.js"],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepare": "node scripts/prepare-oauth-provider.mjs",
+    "check:provider": "node scripts/prepare-oauth-provider.mjs --check",
+    "build": "tsx scripts/build.ts",
+    "test": "npm run build && vitest run && npm run test:worker",
+    "test:worker": "vitest run --config vitest.workers.config.ts",
+    "test:browser-consent": "npm run worker:check && tsx tests/hosted/browser-consent.mjs",
+    "worker:check": "wrangler deploy --dry-run --outdir dist/worker",
+    "types:worker": "wrangler types --strict-vars=false",
+    "types:worker:check": "wrangler types --strict-vars=false --check",
+    "check:artifacts": "node scripts/check-artifacts.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.workers.json",
+    "generate": "tsx scripts/generate.ts",
+    "generate:check": "tsx scripts/generate.ts --check",
+    "api:refresh": "tsx scripts/refresh-api.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.8.3",
+    "@cloudflare/workers-oauth-provider": "1.3.0",
+    "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/core": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@types/node": "24.10.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "esbuild": "0.28.2",
+    "openid-client": "6.9.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "4.1.12",
+    "wrangler": "4.163.0"
+  }
+}

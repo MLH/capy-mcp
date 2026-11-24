@@ -1,0 +1,42 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "capy-mcp",
+  "account_id": "06046e85f1342dd19a0b7e28c6019638",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-23",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "logpush": false,
+  "routes": [
+    { "pattern": "capy-mcp.mlhtools.com", "custom_domain": true, "zone_id": "6ecf640318df7c32426624514662cbf2" }
+  ],
+  "secrets": { "required": ["OIDC_CLIENT_SECRET", "CREDENTIAL_ENCRYPTION_KEY"] },
+  "vars": {
+    "CAPY_TOOL_GROUPS": "attachments,automations,captains,files,folders,issues,messages,projects,reviewFilters,reviewRules,reviews,subagents,threads,usage,users",
+    "MCP_ALLOWED_ORIGINS": "",
+    "PUBLIC_ORIGIN": "https://capy-mcp.mlhtools.com",
+    "OIDC_ISSUER": "https://accounts.google.com",
+    "OIDC_CLIENT_ID": "697859856159-cl1nikp3mbgea6mmvf40r831s8igelq8.apps.googleusercontent.com",
+    "OIDC_ALLOWED_SUBJECTS": "",
+    "OIDC_ADMISSION_CLAIM": "hd",
+    "OIDC_ALLOWED_CLAIM_VALUES": "[\"majorleaguehacking.com\"]",
+    "CREDENTIAL_ENCRYPTION_KEY_ID": "v1"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "capy-mcp-prod", "database_id": "77f7133f-f30b-46db-9522-b134afac71aa", "migrations_dir": "migrations" }
+  ],
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "791eddf467354738bb9c0fe090ebfc11" }
+  ],
+  "ratelimits": [
+    { "name": "AUTH_RATE_LIMITER", "namespace_id": "1974851101", "simple": { "limit": 30, "period": 60 } },
+    { "name": "ACCOUNT_RATE_LIMITER", "namespace_id": "1974851102", "simple": { "limit": 5, "period": 60 } }
+  ],
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  }
+}

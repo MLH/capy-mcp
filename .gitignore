@@ -1,0 +1,11 @@
+node_modules/
+src/hosted/generated-provider/
+dist/
+.wrangler/
+coverage/
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+/.secrets.production.json
