@@ -240,6 +240,32 @@ describe("browser-bound OIDC sign-in", () => {
     expect(finish.status).toBe(403);
     expect(cookie(finish, sessionCookie)).toBe("");
   });
+
+  it.each([
+    ["changed", "outside.example.invalid"],
+    ["missing", undefined],
+  ])("withdraws access from earlier sessions when the same subject reauthenticates with a %s claim", async (_kind, hd) => {
+    const original = await signedIn();
+    const other = await signedIn({ claims: { sub: "another-member" } });
+    expect(original.finish.status).toBe(303);
+    expect(other.finish.status).toBe(303);
+    const denied = await signedIn({ claims: { hd } });
+    expect(denied.finish.status).toBe(403);
+    expect(cookie(denied.finish, sessionCookie)).toBe("");
+
+    const prior = await requireSession(startRequest("/account", { cookie: cookie(original.finish, sessionCookie) }), original.provider.env);
+    const unrelated = await requireSession(startRequest("/account", { cookie: cookie(other.finish, sessionCookie) }), original.provider.env);
+    expect(prior instanceof Response && prior.status).toBe(403);
+    expect(unrelated instanceof Response).toBe(false);
+  });
+
+  it("does not enroll a new subject whose signed claims are denied", async () => {
+    const denied = await signedIn({ claims: { sub: "not-enrolled", hd: "outside.example.invalid" } });
+    expect(denied.finish.status).toBe(403);
+    expect(cookie(denied.finish, sessionCookie)).toBe("");
+    const row = await denied.provider.env.DB.prepare("SELECT COUNT(*) AS count FROM accounts").first<{ count: number }>();
+    expect(row?.count).toBe(0);
+  });
 });
 
 describe("browser session mutation boundary", () => {
@@ -278,6 +304,36 @@ describe("browser session mutation boundary", () => {
     expectProtected(response);
     expectCookie(response, sessionCookie, 0);
     expectCookie(response, csrfCookie, 0);
+    expect(await store.getSession(sessionId)).toBeNull();
+  });
+
+  it("allows only strict, own-session logout after admission tightens, so restoration cannot revive it", async () => {
+    const { env, store, user } = await seedSession();
+    const tightened = { ...env, OIDC_ALLOWED_SUBJECTS: '["different-member"]' };
+    const otherSession = "C".repeat(42) + "A";
+    await store.createSession(otherSession, { accountId: user.id, csrfHash: await hashOpaqueId(csrf), expiresAt: Date.now() + 3_600_000 });
+    const blocked = await requireMutation(mutation(), tightened);
+    expect(blocked instanceof Response && blocked.status).toBe(403);
+    expect((await logout(mutation(undefined, "https://untrusted.invalid"), tightened)).status).toBe(403);
+    expect((await logout(mutation(new URLSearchParams()), tightened)).status).toBe(403);
+    const deny = vi.fn(async (_input: { key: string }) => ({ success: false }));
+    const limited = await logout(mutation(), { ...tightened, ACCOUNT_RATE_LIMITER: { limit: deny } });
+    expect(limited.status).toBe(429);
+    expect(deny).toHaveBeenCalledWith({ key: user.id });
+    expect(await store.getSession(sessionId)).not.toBeNull();
+    const response = await logout(mutation(new URLSearchParams({ csrf, sessionId: otherSession })), tightened);
+    expect(response.status).toBe(303);
+    expectCookie(response, sessionCookie, 0);
+    expect(await store.getSession(sessionId)).toBeNull();
+    expect(await store.getSession(otherSession)).not.toBeNull();
+    const restored = await requireSession(mutation(), env);
+    expect(restored instanceof Response && restored.status).toBe(401);
+  });
+
+  it("can end the caller's session when no admission policy is configured", async () => {
+    const { env, store } = await seedSession();
+    const response = await logout(mutation(), { ...env, OIDC_ADMISSION_CLAIM: "", OIDC_ALLOWED_CLAIM_VALUES: "" });
+    expect(response.status).toBe(303);
     expect(await store.getSession(sessionId)).toBeNull();
   });
 

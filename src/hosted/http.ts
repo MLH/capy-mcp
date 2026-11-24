@@ -1,44 +1,35 @@
-export function withinDeadline<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const aborted = () => reject(new Error("Request cancelled"));
-    if (signal.aborted) aborted();
-    else signal.addEventListener("abort", aborted, { once: true });
-    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
-  });
-}
+export class BodyLimitError extends Error {}
 
-export class BodyTooLarge extends Error {}
-
-export async function readBoundedBody(
-  { headers, body }: Request | Response, maxBytes: number, signal: AbortSignal,
-): Promise<Uint8Array<ArrayBuffer>> {
-  if (Number(headers.get("content-length")) > maxBytes) {
-    if (body) await withinDeadline(body.cancel(), signal).catch(() => {});
-    throw new BodyTooLarge();
-  }
-  if (!body) return new Uint8Array();
-  const reader = body.getReader();
+export async function boundedBody(message: Request | Response, byteLimit: number, signal: AbortSignal) {
+  if (!message.body) return new Uint8Array();
+  const reader = message.body.getReader();
+  const stop = () => { reader.cancel().catch(() => {}); };
+  signal.addEventListener("abort", stop, { once: true });
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
-    while (true) {
-      const { value, done } = await withinDeadline(reader.read(), signal);
-      if (done) break;
-      size += value.byteLength;
-      if (size > maxBytes) throw new BodyTooLarge();
-      chunks.push(value);
+    if (Number(message.headers.get("Content-Length")) > byteLimit) throw new BodyLimitError();
+    signal.throwIfAborted();
+    for (;;) {
+      const chunk = await reader.read();
+      signal.throwIfAborted();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > byteLimit) throw new BodyLimitError();
+      chunks.push(chunk.value);
     }
   } catch (error) {
-    await withinDeadline(reader.cancel(), signal).catch(() => {});
+    stop();
     throw error;
   } finally {
+    signal.removeEventListener("abort", stop);
     reader.releaseLock();
   }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
+  const result = new Uint8Array(size);
+  let at = 0;
   for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
+    result.set(chunk, at);
+    at += chunk.byteLength;
   }
-  return bytes;
+  return result;
 }

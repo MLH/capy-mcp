@@ -73,24 +73,34 @@ function toAccount(row: AccountRow): Account {
   };
 }
 
+function identityValues({ issuer, subject, admissionClaims }: Identity) {
+  const claims = Object.entries(admissionClaims);
+  if (!issuer || issuer.length > MAX_ISSUER_LENGTH || !isOidcSubject(subject) ||
+      claims.length > 1 || claims.some(([name, value]) => !isAdmissionString(name) || !isAdmissionString(value))) {
+    throw new Error("Invalid identity");
+  }
+  return { issuer, subject, claims: JSON.stringify(Object.fromEntries(claims)) };
+}
+
 export function createStore(db: D1Database) {
   const primary = (sql: string) => db.withSession("first-primary").prepare(sql);
 
   return {
     async getOrCreateAccount(identity: Identity): Promise<Account> {
-      const { issuer, subject, admissionClaims } = identity;
-      const claims = Object.entries(admissionClaims);
-      if (!issuer || issuer.length > MAX_ISSUER_LENGTH || !isOidcSubject(subject) ||
-          claims.length > 1 || claims.some(([name, value]) => !isAdmissionString(name) || !isAdmissionString(value))) {
-        throw new Error("Invalid identity");
-      }
+      const { issuer, subject, claims } = identityValues(identity);
       const row = await db.prepare(`
         INSERT INTO accounts (id, issuer, subject, admission_claims) VALUES (?, ?, ?, ?)
         ON CONFLICT (issuer, subject) DO UPDATE SET admission_claims = excluded.admission_claims
         RETURNING ${accountColumns}
-      `).bind(crypto.randomUUID(), issuer, subject, JSON.stringify(Object.fromEntries(claims))).first<AccountRow>();
+      `).bind(crypto.randomUUID(), issuer, subject, claims).first<AccountRow>();
       if (!row) throw new Error("Account write failed");
       return toAccount(row);
+    },
+
+    async updateExistingAdmission(identity: Identity): Promise<void> {
+      const { issuer, subject, claims } = identityValues(identity);
+      await db.prepare("UPDATE accounts SET admission_claims = ? WHERE issuer = ? AND subject = ?")
+        .bind(claims, issuer, subject).run();
     },
 
     async getAccount(id: string): Promise<Account | null> {
