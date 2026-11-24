@@ -5,6 +5,7 @@ import { parseHostedConfig } from "./config.js";
 import { encryptCredential, isCredentialKey } from "./crypto.js";
 import { accessDeniedPage, accountPage, confirmationPage, signInPage } from "./pages.js";
 import { createStore } from "./store.js";
+import { transactions } from "./transactions.js";
 
 const projectsList = selectOperations().find(({ operationId }) => operationId === "projects.list");
 
@@ -65,11 +66,17 @@ export async function handleAccount(request: Request, env: Env, revokeProviderGr
     if (user instanceof Response) return user;
     const { account, form } = user;
     const store = createStore(env.DB);
+    let destination = "/account";
 
     if (path === "/account/key") {
       const [key, ...duplicates] = form.getAll("key");
       if (key === undefined || duplicates.length || !isCredentialKey(key)) return problem(400, "Enter a valid Capy API key.");
       form.delete("key");
+      const id = url.searchParams.get("transaction");
+      if (id !== null && (!/^[0-9a-f-]{36}$/.test(id) || url.searchParams.size !== 1)) return problem(400, "Invalid connection request.");
+      const pending = transactions(env.DB);
+      const expected = id === null ? account.credentialVersion : await pending.onboardingVersion(id, user.session.csrfHash, account.id);
+      if (expected === null) return problem(409, "Connection request expired or changed. Start again.");
       const config = parseHostedConfig(env);
       try {
         await validateCapyKey(key, request.signal);
@@ -79,10 +86,12 @@ export async function handleAccount(request: Request, env: Env, revokeProviderGr
         }
         return problem(503, "Could not validate the Capy key. Try again.");
       }
-      const expected = account.credentialVersion;
       const envelope = await encryptCredential(key, account.id, expected + 1, config.encryption);
       request.signal.throwIfAborted();
-      if (!await store.putCredential(account.id, envelope, expected)) return problem(409, "The Capy connection changed. Reload and try again.");
+      const saved = id === null ? await store.putCredential(account.id, envelope, expected) :
+        await pending.connect(id, user.session.csrfHash, account.id, envelope);
+      if (!saved) return problem(409, "The Capy connection changed. Reload and try again.");
+      if (id !== null) destination = "/oauth/resume?transaction=" + id;
     } else if (path === "/account/key/delete") {
       if (!await store.deleteCredential(account.id)) return problem(409, "No Capy key to remove.");
     } else if (revoke) {
@@ -92,9 +101,7 @@ export async function handleAccount(request: Request, env: Env, revokeProviderGr
     }
 
     if (revokeProviderGrant) await store.cleanupRevoked(account.id, revokeProviderGrant).catch(() => {});
-    const id = url.searchParams.get("transaction");
-    const resume = path === "/account/key" && id && /^[0-9a-f-]{36}$/.test(id) ? "/oauth/resume?transaction=" + id : "/account";
-    return browserResponse(null, { status: 303, headers: { Location: resume } });
+    return browserResponse(null, { status: 303, headers: { Location: destination } });
   } catch {
     return problem(503, "Account operation unavailable.");
   }

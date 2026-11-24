@@ -12,11 +12,13 @@ function escapeHtml(value: string): string {
 }
 
 function page(title: string, content: string, status = 200): Response {
-  return browserResponse(`<!doctype html>
+  const response = browserResponse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)} · Capy MCP</title></head>
 <body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`, {
     status, headers: { "Content-Type": "text/html; charset=utf-8" },
   });
+  if (status === 200) response.headers.set("Referrer-Policy", "strict-origin");
+  return response;
 }
 
 export function signInPage(): Response {
@@ -32,7 +34,11 @@ export function connectForConsent(csrf: string, id: string): Response {
 }
 
 export function consentPage(client: ConsentDescription, subject: string, handle: string, csrf: string): Response {
-  return page("Authorize MCP client", `<p>Signed in as <bdi>${escapeHtml(subject)}</bdi>.</p>
+  const destination = new URL(client.redirectUri);
+  if (!["http:", "https:"].includes(destination.protocol) ||
+      !/^(?:[a-z0-9.-]+|\[[a-f0-9:]+\])(?::\d+)?$/i.test(destination.host)) throw new Error("Invalid consent destination");
+  const target = destination.origin + destination.pathname.replace(/[^\w%./~-]/g, c => "%" + c.charCodeAt(0).toString(16));
+  const response = page("Authorize MCP client", `<p>Signed in as <bdi>${escapeHtml(subject)}</bdi>.</p>
   <p>Client: <bdi>${escapeHtml(client.clientName)}</bdi> (${client.clientDomain ? "verified domain: " + escapeHtml(client.clientDomain) : "unverified name"}).</p>
   <p>Redirect destination: <bdi>${escapeHtml(client.redirectHost)}</bdi> · <code>${escapeHtml(client.redirectUri)}</code>.</p>
   ${client.redirectIsLoopback ? "<p>This is a local app. Any local process could be listening.</p>" : ""}
@@ -42,6 +48,8 @@ export function consentPage(client: ConsentDescription, subject: string, handle:
   <input type="hidden" name="handle" value="${escapeHtml(handle)}">
   ${client.scope.includes("capy:write") ? '<label><input type="checkbox" name="write" value="yes"> Allow write operations, including billable work and organization changes</label>' : ""}
   <button name="decision" value="allow">Allow</button> <button name="decision" value="deny">Deny</button></form>`);
+  response.headers.set("Content-Security-Policy", `default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' ${target}`);
+  return response;
 }
 
 export function accessDeniedPage(): Response {

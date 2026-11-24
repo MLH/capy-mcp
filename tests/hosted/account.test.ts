@@ -91,6 +91,14 @@ afterEach(() => {
 });
 
 describe("hosted account", () => {
+  it("rejects invented onboarding transactions before validating or writing a key", async () => {
+    const owner = await signIn();
+    fakeCapy(() => Response.json({ projects: [] }));
+    const response = await post("/account/key?transaction=" + crypto.randomUUID(), owner.cookie, { csrf: owner.csrf, key: newKey });
+    expect(response.status).toBe(409);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(await store.getAccountConnection(owner.account.id)).toEqual({ connected: false, clients: [] });
+  });
   it("shows only sign-in to unauthenticated visitors and denies their writes", async () => {
     const page = await get("/account");
     expect(page.status).toBe(401);
@@ -192,7 +200,8 @@ describe("hosted account", () => {
     const page = await get("/account", owner.cookie);
     expect(page.status).toBe(200);
     expect(page.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
-    expect(page.headers.get("Referrer-Policy")).toBe("no-referrer");
+    expect(page.headers.get("Referrer-Policy")).toBe("strict-origin");
+    expect(page.headers.get("Content-Security-Policy")).toMatch(/form-action 'self'(?:;|$)/);
     const html = await page.text();
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("&lt;img");

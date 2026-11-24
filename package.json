@@ -20,9 +20,12 @@
     "node": ">=22"
   },
   "scripts": {
+    "prepare": "node scripts/prepare-oauth-provider.mjs",
+    "check:provider": "node scripts/prepare-oauth-provider.mjs --check",
     "build": "tsx scripts/build.ts",
     "test": "npm run build && vitest run && npm run test:worker",
     "test:worker": "vitest run --config vitest.workers.config.ts",
+    "test:browser-consent": "npm run worker:check && node tests/hosted/browser-consent.mjs",
     "worker:check": "wrangler deploy --dry-run --outdir dist/worker",
     "types:worker": "wrangler types --strict-vars=false",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.workers.json",

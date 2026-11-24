@@ -12,6 +12,37 @@ beforeAll(async () => { keys = await signingKey(); });
 beforeEach(resetHostedDb);
 afterEach(() => vi.unstubAllGlobals());
 
+it("reflects verified refresh-token revocation in D1 before acknowledgement, without widening access-token revocation", async () => {
+  const flow = await clientFlow(keys);
+  const { access_token, refresh_token } = await flow.connect("fixture-owner");
+  const kv = flow.env.OAUTH_KV;
+  const id = await flow.env.DB.prepare("SELECT id FROM accounts").first<string>("id");
+  const conn = () => createStore(flow.env.DB).getAccountConnection(id!);
+  const before = await conn();
+  expect(before.clients).toHaveLength(1);
+  const other = await clientFlow(keys, "other");
+  expect((await other.token({ token: refresh_token })).status).toBe(200);
+  expect(await conn()).toEqual(before);
+  expect((await flow.token({ token: access_token, token_type_hint: "refresh_token" })).status).toBe(200);
+  expect(await conn()).toEqual(before);
+  const renewed = await flow.token({ grant_type: "refresh_token", refresh_token, resource });
+  const next = await renewed.json<{ access_token: string; refresh_token: string }>();
+  const entries = (await Promise.all(["grant:", "token:"].map(async prefix =>
+    Promise.all((await kv.list({ prefix: prefix + id + ":" })).keys.map(async k => [k.name, (await kv.get(k.name))!] as const))))).flat();
+  await flow.env.DB.exec("CREATE TRIGGER revocation_unavailable BEFORE UPDATE OF revoked_at ON app_grants BEGIN SELECT RAISE(ABORT, 'unavailable'); END;");
+  try {
+    expect((await flow.token({ token: next.refresh_token })).status).toBe(503);
+    expect(await conn()).toEqual(before);
+  } finally {
+    await flow.env.DB.exec("DROP TRIGGER revocation_unavailable");
+  }
+  expect((await flow.token({ token: next.refresh_token })).status).toBe(200);
+  expect((await conn()).clients).toHaveLength(0);
+  for (const [k, value] of entries) await kv.put(k, value);
+  expect((await rpc(flow.env, next.access_token)).status).toBe(401);
+  expect((await flow.token({ grant_type: "refresh_token", refresh_token: next.refresh_token, resource })).status).toBe(400);
+});
+
 function rpc(env: Env, token: string, method = "tools/list", params?: object) {
   return serveHosted(new Request(resource, { method: "POST", headers: {
     Authorization: "Bearer " + token, Accept: "application/json, text/event-stream", "Content-Type": "application/json",

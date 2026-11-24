@@ -177,8 +177,8 @@ export function createStore(db: D1Database) {
 
     async attachProviderGrant(accountId: string, appGrantId: string, providerId: string, clientId: string): Promise<boolean> {
       const result = await db.prepare(`UPDATE app_grants SET provider_grant_id=? WHERE account_id=? AND id=? AND client_id=?
-        AND provider_grant_id IN (?, ?) AND revoked_at IS NULL`)
-        .bind(providerId, accountId, appGrantId, clientId, "pending:" + appGrantId, providerId).run();
+        AND provider_grant_id=? AND revoked_at IS NULL`)
+        .bind(providerId, accountId, appGrantId, clientId, "pending:" + appGrantId).run();
       return result.meta.changes === 1;
     },
 
@@ -220,6 +220,11 @@ export function createStore(db: D1Database) {
         UPDATE app_grants SET revoked_at = ? WHERE account_id = ? AND id = ? AND revoked_at IS NULL
       `).bind(Date.now(), accountId, grantId).run();
       return result.meta.changes === 1;
+    },
+
+    async revokeVerifiedProviderGrant(accountId: string, providerId: string, clientId: string): Promise<void> {
+      await db.prepare(`UPDATE app_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE account_id=? AND provider_grant_id=? AND client_id=?`)
+        .bind(Date.now(), accountId, providerId, clientId).run();
     },
 
     async cleanupRevoked(accountId: string, revoke: (id: string, user: string) => Promise<void>) {

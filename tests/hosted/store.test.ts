@@ -33,6 +33,15 @@ async function connected(store: ReturnType<typeof createStore>, subject: string)
 beforeEach(resetHostedDb);
 
 describe("accounts and encrypted credentials", () => {
+  it("claims the pending app grant only once for competing code exchanges", async () => {
+    const store = createStore(env.DB);
+    const { account, record } = await connected(store, "one-shot");
+    record.providerGrantId = "pending:" + record.id;
+    expect(await store.createGrant(record, 1, 0)).toBe(true);
+    const claim = () => store.attachProviderGrant(account.id, record.id, "verified-provider-id", record.clientId);
+    expect((await Promise.all([claim(), claim()])).sort()).toEqual([false, true]);
+    expect(await claim()).toBe(false);
+  });
   it("keys accounts by the exact issuer and subject, not an email, even on concurrent sign-ins", async () => {
     const store = createStore(env.DB);
     const firstIdentity = { ...identity("first"), email: "same@example.invalid" };

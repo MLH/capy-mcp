@@ -12,6 +12,88 @@ beforeAll(async () => { keys = await signingKey(); });
 beforeEach(resetHostedDb);
 afterEach(() => vi.unstubAllGlobals());
 
+it("rejects a repeated code exchange even if KV returns the pre-exchange grant", async () => {
+  const flow = await clientFlow(keys);
+  const approved = await flow.decide(await flow.onboard("fixture-key"));
+  const code = new URL(approved.headers.get("Location")!).searchParams.get("code")!;
+  const owner = await flow.env.DB.prepare("SELECT id FROM accounts").first<string>("id");
+  const [entry] = (await flow.env.OAUTH_KV.list({ prefix: "grant:" + owner + ":" })).keys;
+  const before = await flow.env.OAUTH_KV.get(entry.name);
+  expect((await flow.exchange(code)).status).toBe(200);
+  await flow.env.OAUTH_KV.put(entry.name, before!);
+  expect((await flow.exchange(code)).status).toBe(400);
+});
+
+it("requires fresh consent if issuance fails after the D1 code claim", async () => {
+  const flow = await clientFlow(keys);
+  const approved = await flow.decide(await flow.onboard("fixture-key"));
+  const code = new URL(approved.headers.get("Location")!).searchParams.get("code")!;
+  await flow.env.DB.exec("ALTER TABLE credentials RENAME TO unavailable_vault");
+  try {
+    expect((await flow.exchange(code)).status).toBe(503);
+  } finally {
+    await flow.env.DB.exec("ALTER TABLE unavailable_vault RENAME TO credentials");
+  }
+  const retried = await flow.exchange(code);
+  expect(retried.status).toBe(400);
+  expect(await retried.json()).toMatchObject({ error: "invalid_grant" });
+});
+
+it("requires exactly HTTP 200 even for a parseable client metadata document", async () => {
+  const flow = await clientFlow(keys);
+  await flow.onboard("fixture-key");
+  const clientId = "https://partial.example.invalid/metadata";
+  vi.stubGlobal("fetch", async () => Response.json({
+    client_id: clientId, client_name: "Partial", redirect_uris: [redirect], token_endpoint_auth_method: "none",
+  }, { status: 206 }));
+  expect((await flow.authorize({ client_id: clientId })).status).not.toBe(200);
+});
+
+it("does not apply a stale connect-only onboarding form to a now-connected account", async () => {
+  const flow = await clientFlow(keys);
+  const { resume } = await flow.signIn();
+  const page = await flow.visit(resume);
+  const action = (await page.text()).match(/action="(\/account\/key[^"]*)"/)![1];
+  expect((await flow.visit("/account/key", flow.form({ key: "current-key" }))).status).toBe(303);
+  const allowed = await flow.decide(await flow.authorize());
+  expect((await flow.exchange(new URL(allowed.headers.get("Location")!).searchParams.get("code")!)).status).toBe(200);
+  const owner = await flow.env.DB.prepare("SELECT id FROM accounts").first<string>("id");
+  const state = async () => [await flow.env.DB.prepare("SELECT * FROM credentials").first(),
+    await createStore(flow.env.DB).getAccount(owner!), await createStore(flow.env.DB).listGrants(owner!)];
+  const before = await state();
+  expect((await flow.visit(action, flow.form({ key: "stale-key" }))).status).toBe(409);
+  expect(await state()).toEqual(before);
+});
+
+it.each(["expired", "foreign", "consumed", "generation", "expires-during-validation"])("refuses %s onboarding without changing the vault", async kind => {
+  const flow = await clientFlow(keys);
+  const { resume } = await flow.signIn();
+  const page = await flow.visit(resume);
+  expect(page.headers.get("Content-Security-Policy")).toMatch(/form-action 'self'(?:;|$)/);
+  const action = (await page.text()).match(/action="(\/account\/key[^"]*)"/)![1];
+  const expire = () => flow.env.DB.prepare("UPDATE pending_authorizations SET expires_at=0").run();
+  if (kind === "expired") await expire();
+  if (kind === "consumed" || kind === "generation") {
+    expect((await flow.visit(action, flow.form({ key: "fixture-current" }))).status).toBe(303);
+    if (kind === "consumed") expect((await flow.visit(resume)).status).toBe(200);
+    expect((await flow.visit("/account/key/delete", flow.form({}))).status).toBe(303);
+  }
+  const poster = kind === "foreign" ? await clientFlow(keys, "other-member") : flow;
+  if (poster !== flow) await poster.signIn();
+  const delegated = vi.fn(async () => {
+    if (kind === "expires-during-validation") await expire();
+    return Response.json({ projects: [] });
+  });
+  const generations = () => flow.env.DB.prepare("SELECT id, credential_version FROM accounts ORDER BY id").all();
+  const before = await generations();
+  vi.stubGlobal("fetch", delegated);
+  const denied = await poster.visit(action, poster.form({ key: "unwanted-key" }));
+  expect(denied.status).toBe(409);
+  expect(delegated).toHaveBeenCalledTimes(kind === "expires-during-validation" ? 1 : 0);
+  expect((await generations()).results).toEqual(before.results);
+  expect(await flow.env.DB.prepare("SELECT count(*) FROM credentials").first("count(*)")).toBe(0);
+});
+
 it("does not issue a refresh token without consent for offline access", async () => {
   const flow = await clientFlow(keys);
   await flow.onboard("fixture-key");

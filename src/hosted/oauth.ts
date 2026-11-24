@@ -1,4 +1,4 @@
-import { AuthorizationError, GrantType, OAuthError, OAuthProvider, type OAuthHelpers, type OAuthResourceContext } from "@cloudflare/workers-oauth-provider";
+import { AuthorizationError, GrantType, OAuthError, OAuthProvider, type OAuthHelpers, type OAuthResourceContext } from "./generated-provider/oauth-provider.js";
 import { beginLogin, browserResponse, csrfToken, finishLogin, logout, requireMutation, requireSession } from "./browser.js";
 import { handleAccount } from "./account.js";
 import { connectForConsent, consentPage } from "./pages.js";
@@ -81,6 +81,7 @@ export async function handleAuthorization(request: Request, env: Env, oauth: OAu
   if (!auth) return problem(400);
   if (!connected) {
     const transactionId = url.pathname === "/oauth/resume" ? id! : await pending.start(auth, session.csrfHash);
+    if (!await pending.showOnboarding(transactionId, session.csrfHash, user.account)) return problem(409);
     return connectForConsent(csrf, transactionId);
   }
   const client = await oauth.describeConsent(auth);
@@ -127,6 +128,8 @@ export function createHostedProvider(env: Env): OAuthProvider<Env> {
     requiredScopes: ["capy:read"],
     scopesSupported: scopes,
     clientIdMetadataDocumentEnabled: true,
+    onVerifiedRefreshRevocation: ({ env, userId, grantId, clientId }) =>
+      createStore(env.DB).revokeVerifiedProviderGrant(userId, grantId, clientId),
     async tokenExchangeCallback({ env, grantType, props, resource: audience, userId, clientId, grantId, requestedScope }) {
       if (audience !== resource || !grantProps(props, userId) ||
           grantType === GrantType.AUTHORIZATION_CODE && !await createStore(env.DB).attachProviderGrant(userId, props.appGrantId, grantId, clientId) ||
