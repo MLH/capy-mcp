@@ -31,6 +31,16 @@ The Google and Entra claim shapes are covered by signed fixtures. Neither real r
 
 ## Provision and deploy to the approved target
 
+### MLH deployment
+
+The approved MLH target uses `wrangler.production.jsonc`, `https://capy-mcp.mlhtools.com`, Google project `capy-mcp`, D1 `capy-mcp-prod`, and KV `capy-mcp-oauth`. The application's admission rule checks Google's signed `hd` claim for `majorleaguehacking.com`; group admission is enforced separately by Cloudflare Access.
+
+Before exposing this hostname, verify that the **Capy MCP** self-hosted Access application protects the entire hostname and allows only `sg-capy-mcp-access@majorleaguehacking.com` through the **Major League Hacking** Google Workspace identity provider. Keep Access Managed OAuth disabled on this application because the Worker already issues its own MCP OAuth challenges and tokens. Keep `workers_dev` and `preview_urls` disabled, with no unauthenticated path exceptions or bypass policies. This uses an Internet-facing Cloudflare edge protected by Access, not private network routing.
+
+An unauthenticated client, including an MCP portal's server-side connection without suitable Access authentication, will be blocked before reaching the Worker. Portal interoperability is a separate live check; do not weaken Access or replace per-user OAuth with a shared Capy key just to make a connection succeed. Use the same production config for migration and deployment commands below.
+
+### Operator procedure
+
 1. With the approved Cloudflare credentials and target selected, provision a dedicated D1 database and KV namespace. The Wrangler commands are `npx wrangler d1 create <approved-database-name>` and `npx wrangler kv namespace create <approved-namespace-name>`. Use their actual names/IDs for `DB` and `OAUTH_KV`; never point an environment at someone else's resources. Set distinct numeric rate-limit namespace IDs for `AUTH_RATE_LIMITER` (login and public OAuth endpoints) and `ACCOUNT_RATE_LIMITER` (account and consent mutations); review limits against shared-IP traffic. Use separate bindings and secrets per environment. Keep preview URLs off, and configure the approved route or workers.dev hostname to match `PUBLIC_ORIGIN`. A network-reachable Worker is not a private network.
 2. Start with `npm ci`, `npm run check:provider`, and the checks in [CONTRIBUTING.md](../CONTRIBUTING.md). Run `npx wrangler deploy --config <approved-config> --dry-run --outdir dist/worker`, without secrets, to check bundle and binding shape. A dry run doesn't check remote bindings, deployed logs, or login. After reviewing migrations and protecting any existing database, run `npx wrangler d1 migrations list DB --remote --config <approved-config>` and `npx wrangler d1 migrations apply DB --remote --config <approved-config>`, then list again to confirm none are pending. Include the same `--env` everywhere if using a named environment.
 3. Provision the two required secrets in `.secrets.production.json` at the repository root (the only Git-ignored path for that filename), or use a protected file outside the checkout supplied by the operator’s secret manager. Use a restrictive umask (`077`) and mode `0600`. Enter literal JSON string values, normally escaped for JSON. Do not use dotenv substitution, `vars`, command-line values, shell history, or chat:
