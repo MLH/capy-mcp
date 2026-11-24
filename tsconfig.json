@@ -11,5 +11,5 @@
     "types": ["node"]
   },
   "include": ["src", "scripts", "tests", "vitest.config.ts"],
-  "exclude": ["src/worker.ts", "tests/worker.test.ts"]
+  "exclude": ["src/worker.ts", "src/hosted", "tests/worker.test.ts", "tests/hosted"]
 }

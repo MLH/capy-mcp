@@ -30,7 +30,7 @@ describe("private Worker in workerd", () => {
     const config = JSON.parse(wranglerSource);
     expect(config.workers_dev).toBe(true);
     expect(config.preview_urls).toBe(false);
-    expect(config.secrets.required).toEqual(["CAPY_API_KEY", "MCP_AUTH_TOKEN"]);
+    expect(config.secrets.required).toEqual(["CAPY_API_KEY", "MCP_AUTH_TOKEN", "OIDC_CLIENT_SECRET", "CREDENTIAL_ENCRYPTION_KEY"]);
     expect(config.vars.MCP_ALLOWED_ORIGINS).toBe("");
   });
 
