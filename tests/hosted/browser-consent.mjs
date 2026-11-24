@@ -103,7 +103,12 @@ try {
   { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
   stopChrome = watchBrowser(chrome);
   const tab = await openBrowserTab(chrome);
-  await tab("Emulation.setDeviceMetricsOverride", { width: 940, height: 850, deviceScaleFactor: 1, mobile: false });
+  const desktopWidth = 940;
+  const mobileWidth = 375;
+  async function viewport(width) {
+    await tab("Emulation.setDeviceMetricsOverride", { width, height: 850, deviceScaleFactor: 1, mobile: width === mobileWidth });
+  }
+  await viewport(desktopWidth);
   async function evaluate(expression) {
     return (await tab("Runtime.evaluate", { expression, returnByValue: true })).result?.value;
   }
@@ -125,26 +130,84 @@ try {
     const clicked = await evaluate(`(() => { const button = document.querySelector(${JSON.stringify(selector)}); if (!button) return false; button.click(); return true; })()`);
     assert.ok(clicked, "Control not rendered: " + selector);
   }
-  async function capture(name) {
+  async function verifyLayout(width, primary, firstControl, controls) {
+    await viewport(width);
+    const visual = await evaluate(`(() => {
+      const main = document.querySelector('main');
+      const body = getComputedStyle(document.body);
+      const primary = document.querySelector(${JSON.stringify(primary)});
+      const elements = ${JSON.stringify(controls)}.map(selector => document.querySelector(selector));
+      const visible = elements.every(element => {
+        if (!element?.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+        element.scrollIntoView({ block: 'center' });
+        const { left, top, right, bottom, width, height } = element.getBoundingClientRect();
+        return width > 0 && height > 0 && left >= 0 && right <= innerWidth && top >= 0 && bottom <= innerHeight &&
+          element.contains(document.elementFromPoint(left + width / 2, top + height / 2));
+      });
+      const dynamic = [...main.querySelectorAll('bdi, p > code')];
+      const text = dynamic.map(node => node.textContent);
+      try {
+        dynamic.forEach(node => { node.textContent += 'x'.repeat(600); });
+        return {
+          viewport: innerWidth,
+          noOverflow: document.documentElement.scrollWidth === document.documentElement.clientWidth &&
+            main.scrollWidth === main.clientWidth,
+          styled: body.backgroundImage.includes('linear-gradient') && getComputedStyle(main).backgroundColor === 'rgb(255, 255, 255)' &&
+            getComputedStyle(primary).backgroundColor === 'rgb(248, 185, 42)',
+          visible,
+        };
+      } finally {
+        dynamic.forEach((node, i) => { node.textContent = text[i]; });
+        window.scrollTo(0, 0);
+        main.tabIndex = -1;
+        main.focus();
+        main.removeAttribute('tabindex');
+      }
+    })()`);
+    assert.deepEqual(visual, { viewport: width, noOverflow: true, styled: true, visible: true }, "Hosted paint, controls and long text must fit the viewport");
+    await tab("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    await tab("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    assert.equal(await evaluate(`(() => {
+      const element = document.querySelector(${JSON.stringify(firstControl)});
+      const style = getComputedStyle(element);
+      return element === document.activeElement && element.matches(':focus-visible') &&
+        style.outlineStyle === 'solid' && parseFloat(style.outlineWidth) >= 2;
+    })()`), true, "First control must show visible keyboard focus");
+    await evaluate("document.activeElement.blur(); window.scrollTo(0, 0);");
+  }
+  async function capture(name, subdir = "") {
     const screenshotDir = process.env.HOSTED_SCREENSHOT_DIR;
     if (!screenshotDir) return;
     assert.ok(await evaluate(`[...document.querySelectorAll('input[type=password]')].every(input => input.value === '')`), "Never capture a populated key input");
-    const destination = name === "04-consent" ? await evaluate(`(() => {
+    const redact = name === "04-consent";
+    if (redact) assert.equal(await evaluate(`(() => {
       const code = document.querySelector("main > p > code");
-      const original = code.textContent;
+      if (!code) return false;
       code.textContent = "[callback URL redacted]";
-      return original;
-    })()`) : null;
+      return true;
+    })()`), true, "Consent callback display must be redacted before capture");
     try {
       assert.equal(await evaluate(`/(?:[?&](?:code|state|token)=|Bearer |https?:\\/\\/)/i.test(document.body.innerText)`), false,
         "Do not capture callback URLs or credentials in visible content");
-      const height = Math.min(850, await evaluate("document.querySelector('main')?.getBoundingClientRect().bottom ?? 38") + 32);
-      const { data } = await tab("Page.captureScreenshot", { format: "png", clip: { x: 0, y: 0, width: 940, height, scale: 1 } });
-      await mkdir(screenshotDir, { recursive: true });
-      await writeFile(join(screenshotDir, name + ".png"), Buffer.from(data, "base64"));
+      const { width, height } = await evaluate(`({
+        width: innerWidth,
+        height: Math.ceil(document.querySelector('main').getBoundingClientRect().bottom + scrollY +
+          parseFloat(getComputedStyle(document.body).paddingBottom)),
+      })`);
+      const { data } = await tab("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width, height, scale: 1 } });
+      const output = join(screenshotDir, subdir);
+      await mkdir(output, { recursive: true });
+      await writeFile(join(output, name + ".png"), Buffer.from(data, "base64"));
     } finally {
-      if (destination) await evaluate(`document.querySelector("main > p > code").textContent = ${JSON.stringify(destination)}`);
+      if (redact) await evaluate(`document.querySelector("main > p > code").textContent = ${JSON.stringify(redirect)}`);
     }
+  }
+  async function captureResponsive(name, primary, firstControl, controls) {
+    await verifyLayout(desktopWidth, primary, firstControl, controls);
+    await capture(name);
+    await verifyLayout(mobileWidth, primary, firstControl, controls);
+    await capture(name, "mobile");
+    await viewport(desktopWidth);
   }
   async function callback(flow, decision) {
     await until(() => callbacks.get(flow.state) !== undefined, "Registered callback did not arrive: " + new URL(flow.redirectUri).hostname + " " + decision);
@@ -180,7 +243,9 @@ try {
   assert.equal(capyCalls, 1);
   assert.equal(await evaluate(`document.querySelector("main > p > code")?.textContent === ${JSON.stringify(redirect)}`), true);
   assert.ok(await evaluate("document.querySelector('input[name=write]')?.checked === false"), "Write must be opt-in");
-  await capture("04-consent");
+  await captureResponsive("04-consent", 'button[value="allow"]', "input[name=write]", [
+    "input[name=write]", 'button[value="allow"]', 'button[value="deny"]',
+  ]);
   await click('button[value="allow"]');
   const code = await callback(onboard, "allow");
   assert.ok(Boolean(code));
@@ -204,7 +269,10 @@ try {
 
   await navigate(origin + "/account");
   await rendered("Example MCP client");
-  await capture("05-account");
+  await captureResponsive("05-account", 'form[action="/account/key"] button', "#capy-key", [
+    "#capy-key", 'form[action="/account/key"] button', 'a[href="/account?confirm=delete"]',
+    'a[href^="/account?confirm=revoke&"]', 'a[href="/account?confirm=disconnect"]', 'form[action="/auth/logout"] button',
+  ]);
   await click('a[href^="/account?confirm=revoke&"]');
   await rendered("Other clients, the key, and this browser session are unchanged.");
   await capture("06-revoke");
@@ -256,4 +324,4 @@ try {
 }
 assert.equal(callbackPrivacyViolation, false, "Client callback received referrer or cookies");
 assert.equal(callbackArrivals, 5, "Unexpected number of callback arrivals");
-console.log("PASS: signed cross-site OIDC admission and denial, Capy onboarding, consent and OAuth PKCE exchange, authenticated MCP call, closed revocation, guarded disconnect, and private IPv4/IPv6 loopback callbacks.");
+console.log("PASS: signed cross-site OIDC admission and denial, Capy onboarding, consent and OAuth PKCE exchange, authenticated MCP call, closed revocation, guarded disconnect, private IPv4/IPv6 loopback callbacks, and responsive paint and keyboard focus.");
