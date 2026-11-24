@@ -23,6 +23,7 @@ export async function fakeIssuer(keys: CryptoKeyPair, options: {
   claimName?: string;
   claimValue?: string;
   claims?: Record<string, unknown>;
+  endpoints?: { authorization: string; token: string; jwks: string };
   metadata?: Record<string, unknown>;
   discoveryResponse?: () => Response;
   tokenResponse?: () => Response;
@@ -38,9 +39,12 @@ export async function fakeIssuer(keys: CryptoKeyPair, options: {
   });
   const discovery = `${issuer}/.well-known/openid-configuration`;
   const tenant = issuer.replace(/\/v2\.0$/, "");
-  const authorization = issuer === googleIssuer ? `${issuer}/o/oauth2/v2/auth` : `${tenant}/oauth2/v2.0/authorize`;
-  const token = issuer === googleIssuer ? "https://oauth2.googleapis.com/token" : `${tenant}/oauth2/v2.0/token`;
-  const jwks = issuer === googleIssuer ? "https://www.googleapis.com/oauth2/v3/certs" : `${tenant}/discovery/v2.0/keys`;
+  const authorization = options.endpoints?.authorization ??
+    (issuer === googleIssuer ? `${issuer}/o/oauth2/v2/auth` : `${tenant}/oauth2/v2.0/authorize`);
+  const token = options.endpoints?.token ??
+    (issuer === googleIssuer ? "https://oauth2.googleapis.com/token" : `${tenant}/oauth2/v2.0/token`);
+  const jwks = options.endpoints?.jwks ??
+    (issuer === googleIssuer ? "https://www.googleapis.com/oauth2/v3/certs" : `${tenant}/discovery/v2.0/keys`);
   const jwk = { ...await crypto.subtle.exportKey("jwk", keys.publicKey), kid: "fixture-key", alg: "RS256", use: "sig" };
   const requests: string[] = [];
   const flows = new Map<string, { nonce: string; challenge: string; redirect: string }>();

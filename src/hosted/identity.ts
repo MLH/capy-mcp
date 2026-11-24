@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import * as oidc from "openid-client";
 import type { HostedConfig } from "./config.js";
 import { isAdmissionString, isOidcSubject, type Identity } from "./store.js";
@@ -7,23 +8,37 @@ export const OIDC_CALLBACK_PATH = "/auth/callback";
 const requestSeconds = 5;
 const flowMillis = 12_000;
 const maxBodyBytes = 262_144;
+const authorizationParameters = new Set([
+  "client_id", "redirect_uri", "response_type", "response_mode", "scope", "state", "nonce",
+  "code_challenge", "code_challenge_method", "request", "request_uri",
+]);
 
-function trustedEndpoint(value: unknown, issuer: URL, exception?: string): string {
+function requirePublicHost(url: URL): void {
+  const host = url.hostname.replace(/\.$/, "");
+  if (!host.includes(".") || isIP(host.replace(/^\[|\]$/g, "")) ||
+      /\.(?:localhost|local|internal|home\.arpa)$/.test(host) || host === "home.arpa") {
+    throw new Error("Invalid identity host");
+  }
+}
+
+function trustedEndpoint(value: unknown): URL {
   if (typeof value !== "string" || value.length > 2_048) throw new Error("Invalid identity endpoint");
   const url = new URL(value);
-  if (url.href !== value || url.protocol !== "https:" || url.username || url.password ||
-      /[?#]/.test(value) || (url.origin !== issuer.origin && url.href !== exception)) {
+  if ((url.href !== value && url.origin !== value) || url.protocol !== "https:" ||
+      url.username || url.password || value.includes("#")) {
     throw new Error("Invalid identity endpoint");
   }
-  return url.href;
+  requirePublicHost(url);
+  return url;
 }
 
 async function discover(config: HostedConfig, requestSignal: AbortSignal) {
   const issuer = new URL(config.issuer);
+  requirePublicHost(issuer);
   const discovery = new URL(issuer);
   discovery.pathname = `${issuer.pathname.replace(/\/$/, "")}/.well-known/openid-configuration`;
   const deadline = AbortSignal.any([requestSignal, AbortSignal.timeout(flowMillis)]);
-  const allowed = new Map([[discovery.href, "GET"]]);
+  const allowed = new Set([`GET ${discovery.href}`]);
   const clientAuth: oidc.ClientAuth = (server, client, body, headers) => {
     const supported = server.token_endpoint_auth_methods_supported;
     if (supported?.includes("client_secret_post")) return oidc.ClientSecretPost(config.clientSecret)(server, client, body, headers);
@@ -34,7 +49,7 @@ async function discover(config: HostedConfig, requestSignal: AbortSignal) {
     execute: [oidc.enableNonRepudiationChecks],
     timeout: requestSeconds,
     [oidc.customFetch]: async (url, options) => {
-      if (allowed.get(url) !== options.method) throw new Error("Invalid identity endpoint");
+      if (!allowed.has(`${options.method} ${url}`)) throw new Error("Invalid identity endpoint");
       if (options.body !== undefined && !(options.body instanceof URLSearchParams)) throw new Error("Invalid identity request");
       const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
       const response = await withinDeadline(fetch(url, {
@@ -53,12 +68,12 @@ async function discover(config: HostedConfig, requestSignal: AbortSignal) {
       (metadata.code_challenge_methods_supported && !metadata.code_challenge_methods_supported.includes("S256"))) {
     throw new Error("Invalid identity metadata");
   }
-  const google = config.issuer === "https://accounts.google.com";
-  trustedEndpoint(metadata.authorization_endpoint, issuer);
-  const token = trustedEndpoint(metadata.token_endpoint, issuer, google ? "https://oauth2.googleapis.com/token" : undefined);
-  const jwks = trustedEndpoint(metadata.jwks_uri, issuer, google ? "https://www.googleapis.com/oauth2/v3/certs" : undefined);
-  allowed.set(token, "POST");
-  allowed.set(jwks, "GET");
+  const authorization = trustedEndpoint(metadata.authorization_endpoint);
+  for (const name of authorization.searchParams.keys()) {
+    if (authorizationParameters.has(name)) throw new Error("Invalid identity authorization parameters");
+  }
+  allowed.add(`POST ${trustedEndpoint(metadata.token_endpoint).href}`);
+  allowed.add(`GET ${trustedEndpoint(metadata.jwks_uri).href}`);
   return client;
 }
 

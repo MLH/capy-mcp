@@ -13,10 +13,12 @@ const login = () => new Request(`${browserOrigin}/login`);
 it.each([
   ["metadata for a different tenant", { issuer: "https://login.microsoftonline.com/other-tenant/v2.0" }],
   ["authorization with a non-HTTPS scheme", { authorization_endpoint: "http://login.microsoftonline.com/auth" }],
-  ["authorization on another host", { authorization_endpoint: "https://untrusted.invalid/authorize" }],
   ["authorization with prefilled protocol parameters", { authorization_endpoint: "https://login.microsoftonline.com/authorize?redirect_uri=https://untrusted.invalid" }],
-  ["token endpoint on another host", { token_endpoint: "https://untrusted.invalid/token" }],
-  ["JWKS on another host", { jwks_uri: "https://untrusted.invalid/jwks" }],
+  ["authorization with URL credentials", { authorization_endpoint: "https://user@auth.example.invalid/authorize" }],
+  ["token endpoint on a link-local address", { token_endpoint: "https://169.254.169.254/token" }],
+  ["token endpoint on an IPv6 loopback address", { token_endpoint: "https://[::1]/token" }],
+  ["JWKS on a local hostname", { jwks_uri: "https://service.localhost/jwks" }],
+  ["JWKS with a fragment", { jwks_uri: "https://keys.example.invalid/jwks#fragment" }],
   ["metadata explicitly excluding S256", { code_challenge_methods_supported: ["plain"] }],
 ])("does not begin login with %s", async (_name, metadata) => {
   const issuer = await fakeIssuer(keys, { issuer: entraIssuer, metadata });
@@ -25,6 +27,34 @@ it.each([
   expect(response.headers.has("Location")).toBe(false);
   expect(response.headers.has("Set-Cookie")).toBe(false);
   expect(issuer.requests).toEqual([`${entraIssuer}/.well-known/openid-configuration`]);
+});
+
+it("accepts public HTTPS endpoints on different origins from a trusted non-Google issuer", async () => {
+  const issuer = await fakeIssuer(keys, {
+    issuer: "https://issuer.example.invalid/region",
+    endpoints: {
+      authorization: "https://login.example.invalid/authorize?realm=engineering",
+      token: "https://tokens.example.invalid/token?realm=engineering",
+      jwks: "https://keys.example.invalid/jwks?realm=engineering",
+    },
+  });
+  const start = await beginLogin(login(), issuer.env, { kind: "account" });
+  expect(start.status).toBe(303);
+  const target = new URL(start.headers.get("Location") ?? "");
+  expect(target.origin + target.pathname).toBe("https://login.example.invalid/authorize");
+  expect(target.searchParams.get("realm")).toBe("engineering");
+  const cookie = start.headers.getSetCookie()[0]?.split(";", 1)[0] ?? "";
+  const callback = await finishLogin(new Request(issuer.callback(start), { headers: { cookie } }), issuer.env);
+  expect(callback.status).toBe(303);
+  expect(issuer.requests).toContain("https://tokens.example.invalid/token?realm=engineering");
+  expect(issuer.requests).toContain("https://keys.example.invalid/jwks?realm=engineering");
+});
+
+it("does not perform discovery against a nonpublic configured issuer", async () => {
+  const issuer = await fakeIssuer(keys, { issuer: "https://127.0.0.1" });
+  const response = await beginLogin(login(), issuer.env, { kind: "account" });
+  expect(response.status).toBe(400);
+  expect(issuer.requests).toEqual([]);
 });
 
 it("never follows a discovery redirect, even on the issuer host", async () => {
