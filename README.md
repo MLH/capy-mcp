@@ -2,6 +2,8 @@
 
 Expose 102 named Capy API tools to external MCP clients through local STDIO or a self-hosted Cloudflare Worker. Both transports use the same generated schemas, validation, group filtering, and bounded API client. The upstream origin is fixed to `https://api.capy.ai`. The server has no client-specific runtime dependency.
 
+The Capy name and branding belong to [Scrapybara, Inc.](https://scrapybara.com/). This is an independent integration maintained by Major League Hacking PBC Inc., not an official Scrapybara product; references to Capy do not imply sponsorship or endorsement. This project's MIT license does not grant rights to Capy's name or branding.
+
 Licensed under [MIT](LICENSE). Public npm releases use staged publishing through GitHub Actions OIDC, followed by a maintainer's npm 2FA approval. A staged version is not installable until approved; see the [release runbook](docs/npm-release.md).
 
 ## npm STDIO installation
